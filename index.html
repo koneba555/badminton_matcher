@@ -19,6 +19,7 @@
   </style>
 </head>
 <body>
+  <div id="ptr" style="position:fixed;top:0;left:0;right:0;height:0;background:#0f172a;display:flex;align-items:flex-end;justify-content:center;padding-bottom:0;overflow:hidden;z-index:200"></div>
   <div id="app"></div>
   <script>
   'use strict';
@@ -41,6 +42,7 @@
       scores: {},         // {id: int}
       usedPartners: [],   // partner pairs used across all cycles
       cycleCount: 1,
+      restingIds: [],
       lastSoloId: null,   // id of player who was solo last cycle
       schedule: [],       // precomputed round-robin schedule (array of team arrays)
       scheduleIdx: 0,     // current position in schedule
@@ -75,6 +77,37 @@
   let summaryCycle = 1;
   let undoStack = [];
   let showAddPlayer = false;
+  let theme = localStorage.getItem('bmt_theme') || 'light';
+
+  // Dark → Light pastel color map (applied via replaceAll on rendered HTML)
+  const DARK_TO_LIGHT = [
+    ['#0f172a','#FFF9D2'],['#1e293b','#FFEBCC'],['#334155','#c8dff0'],
+    ['#475569','#6b7280'],['#64748b','#9ca3af'],['#94a3b8','#374151'],
+    ['#f1f5f9','#2d3748'],['#cbd5e1','#4a5568'],
+    ['#2563eb','#5b8bb5'],['#1d4ed8','#5b8bb5'],
+    ['#16a34a','#3d8b5a'],['#22c55e','#4caf70'],
+    ['#1e3a5f','#d4eaf7'],['#93c5fd','#1a4971'],['#bfdbfe','#1a4971'],
+    ['#3f1212','#fde8d8'],['#991b1b','#c47a5a'],
+    ['#fca5a5','#7a3300'],['#fecaca','#7a3300'],
+    ['#7c3aed','#7b6ac4'],['#451a00','#fde8d8'],
+    ['#78350f','#c47a5a'],['#d97706','#b87040'],
+    ['#7f1d1d','#f5c0b0'],['#1e3a2f','#d4f0e4'],
+    ['#4ade80','#1d7a45'],['#86efac','#2d9b5e'],
+    ['#fde68a','#7a5c00'],['#fbbf24','#b87040'],
+  ];
+
+  function applyThemeToDOM() {
+    const bg = theme === 'light' ? '#FFF9D2' : '#0f172a';
+    const fg = theme === 'light' ? '#2d3748' : '#f1f5f9';
+    document.body.style.background = bg;
+    document.body.style.color = fg;
+    document.documentElement.style.background = bg;
+    let el = document.getElementById('bmt-theme-style');
+    if (!el) { el = document.createElement('style'); el.id = 'bmt-theme-style'; document.head.appendChild(el); }
+    el.textContent = theme === 'light'
+      ? '.del-mode-card{background:#fde0d5!important;color:#7a3300!important}'
+      : '.del-mode-card{background:#3f1212!important;color:#fca5a5!important}';
+  }
 
   // Re-render summary on orientation/resize so cell size recomputes
   let _resizeTimer = null;
@@ -119,13 +152,29 @@
       const N = S.teams.length;
       // Cycle done when all teams hit cap
       if (Array.from({length: N}, (_, i) => (tmc[i] || 0)).every(c => c >= threshold)) return true;
-      // Find next challenger that hasn't hit cap yet
-      const idx = S.waitQueue.findIndex(i => (tmc[i] || 0) < threshold);
+      // Find next challenger: under cap AND not yet played against current court this cycle
+      const idx = S.waitQueue.findIndex(i =>
+        (tmc[i] || 0) < threshold && !played.has(tpKey(S.courtIdx, i))
+      );
       if (idx >= 0) {
         S.challengerIdx = S.waitQueue.splice(idx, 1)[0];
         return false;
       }
-      // No under-cap challenger available → cycle ends
+      // Court exhausted all valid challengers → find any under-cap pair not yet played
+      const pool = [...S.waitQueue, S.courtIdx];
+      const underCap = pool.filter(i => (tmc[i] || 0) < threshold);
+      for (let i = 0; i < underCap.length; i++) {
+        for (let j = i + 1; j < underCap.length; j++) {
+          if (!played.has(tpKey(underCap[i], underCap[j]))) {
+            const newCourt = underCap[i], newChallenger = underCap[j];
+            S.waitQueue = pool.filter(x => x !== newCourt && x !== newChallenger);
+            S.courtIdx = newCourt;
+            S.challengerIdx = newChallenger;
+            return false;
+          }
+        }
+      }
+      // No valid unplayed pair among under-cap teams → end cycle
       return true;
     }
 
@@ -219,6 +268,67 @@
   }
   function clearAll() { S = defaultState(); save(); render(); }
 
+  function removePlayerMidGame(id) {
+    // Remove from present roster; keep score intact; track as resting
+    S.presentIds = S.presentIds.filter(x => x !== id);
+    if (!(S.restingIds||[]).includes(id)) S.restingIds = [...(S.restingIds||[]), id];
+    S.schedule = []; S.scheduleIdx = -1; // force rebuild next cycle
+
+    const teamIdx = S.teams.findIndex(t => t.includes(id));
+    if (teamIdx === -1 || S.screen !== 'playing') {
+      showAddPlayer = false; save(); render(); return;
+    }
+
+    const remaining = S.teams[teamIdx].filter(x => x !== id);
+    if (remaining.length > 0) {
+      // Partner stays → team shrinks to solo, no index remap needed
+      S.teams[teamIdx] = remaining;
+      if (S.lastSoloId === id) S.lastSoloId = remaining[0];
+      showAddPlayer = false; save(); render(); return;
+    }
+
+    // Remove entire team → remap all team indices
+    S.teams.splice(teamIdx, 1);
+    const gone = i => i === teamIdx;
+    const remap = i => i > teamIdx ? i - 1 : i;
+
+    S.cyclePlayedPairs = (S.cyclePlayedPairs || [])
+      .filter(k => { const [a,b]=k.split(',').map(Number); return !gone(a)&&!gone(b); })
+      .map(k => { const [a,b]=k.split(',').map(Number); return tpKey(remap(a),remap(b)); });
+
+    const newTmc = {};
+    Object.entries(S.teamMatchCounts||{}).forEach(([k,v]) => {
+      const idx=parseInt(k);
+      if(!gone(idx)) newTmc[remap(idx)]=v;
+    });
+    S.teamMatchCounts = newTmc;
+
+    if (gone(S.courtIdx)) {
+      // Court left → push old challenger back to queue, pick new court
+      S.waitQueue.push(S.challengerIdx);
+      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
+      if (S.waitQueue.length > 0) {
+        S.courtIdx = S.waitQueue.shift();
+        const done = setupNextMatch();
+        if (done) { S.screen='newcycle'; S.cycleCount++; }
+      } else { S.screen='newcycle'; S.cycleCount++; }
+    } else if (gone(S.challengerIdx)) {
+      // Challenger left → court stays, find new challenger
+      S.courtIdx = remap(S.courtIdx);
+      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
+      const done = setupNextMatch();
+      if (done) { S.screen='newcycle'; S.cycleCount++; }
+    } else {
+      // Removed team was in waitQueue
+      S.courtIdx = remap(S.courtIdx);
+      S.challengerIdx = remap(S.challengerIdx);
+      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
+    }
+
+    if (S.lastSoloId === id) S.lastSoloId = null;
+    showAddPlayer = false; save(); render();
+  }
+
   function initCycle(teams) {
     S.teams = teams;
     // Track solo player for this cycle
@@ -290,6 +400,7 @@
     }
     if (S.presentIds.includes(id)) return;
     S.presentIds.push(id);
+    S.restingIds = (S.restingIds||[]).filter(x => x !== id);
     if (!S.scores) S.scores = {};
     S.scores[id] = S.scores[id] || 0;
     // Inject as new team into current cycle's wait queue
@@ -388,6 +499,25 @@
     save(); render();
   }
 
+  function skipMatch() {
+    const played = new Set(S.cyclePlayedPairs);
+    const curKey = tpKey(S.courtIdx, S.challengerIdx);
+    const pool = [...S.waitQueue, S.courtIdx, S.challengerIdx];
+    // Find another unplayed pair (not the current one)
+    for (let i = 0; i < pool.length; i++) {
+      for (let j = i + 1; j < pool.length; j++) {
+        const k = tpKey(pool[i], pool[j]);
+        if (k !== curKey && !played.has(k)) {
+          S.courtIdx = pool[i];
+          S.challengerIdx = pool[j];
+          S.waitQueue = pool.filter(x => x !== S.courtIdx && x !== S.challengerIdx);
+          save(); render(); return;
+        }
+      }
+    }
+    // No other pair available — cannot skip
+  }
+
   function endSession() { S.screen = 'final'; save(); render(); }
   function continuePlaying() { S.screen = 'playing'; save(); render(); }
 
@@ -415,29 +545,42 @@
     let html = (screens[S.screen] || renderSetup)();
     if (showSummary) html += renderSummaryModal();
     if (showAddPlayer) html += renderAddPlayerPanel();
+    // Theme toggle button (fixed top-left)
+    html += `<button id="themeToggleBtn" class="btn" style="position:fixed;top:1.2vh;left:2vw;z-index:50;background:${theme==='dark'?'#334155':'#c8dff0'};color:${theme==='dark'?'#94a3b8':'#374151'};border-radius:8px;padding:0.4vh 0.8vh;font-size:1.8vh">${theme==='dark'?'☀️':'🌙'}</button>`;
+    if (theme === 'light') DARK_TO_LIGHT.forEach(([d,l]) => { html = html.replaceAll(d, l); });
     document.getElementById('app').innerHTML = html;
+    applyThemeToDOM();
     bind();
   }
 
   function renderAddPlayerPanel() {
     const absent = S.players.filter(p => !S.presentIds.includes(p.id));
+    const present = S.players.filter(p => S.presentIds.includes(p.id));
     return `
 <div id="addPlayerOverlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:100;padding:2vw">
-  <div style="background:#1e293b;border-radius:20px;padding:2vh;width:100%;max-width:88vw">
+  <div style="background:#1e293b;border-radius:20px;padding:2vh;width:100%;max-width:88vw;max-height:85dvh;overflow-y:auto">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5vh">
-      <div style="font-size:1.9vh;font-weight:800">➕ เพิ่มผู้เล่นกลางคัน</div>
+      <div style="font-size:1.9vh;font-weight:800">👥 จัดการผู้เล่น</div>
       <button id="closeAddPlayerBtn" class="btn" style="background:#334155;color:#94a3b8;border-radius:8px;padding:0.6vh 1vh;font-size:1.6vh">✕</button>
     </div>
-    <div style="display:flex;gap:1vh;margin-bottom:${absent.length > 0 ? '1.5vh' : '0'}">
+    <!-- Add new -->
+    <div style="display:flex;gap:1vh;margin-bottom:1.5vh">
       <input id="addMidInp" type="text" placeholder="ชื่อผู้เล่นใหม่" maxlength="20"
         style="flex:1;background:#334155;border:none;border-radius:12px;padding:1.2vh 1.5vh;font-size:1.8vh;color:#f1f5f9;outline:none;font-family:inherit">
       <button id="addMidBtn" class="btn" style="background:#2563eb;color:#fff;border-radius:12px;padding:0 2vh;font-size:1.8vh;font-weight:700">เพิ่ม</button>
     </div>
     ${absent.length > 0 ? `
-    <div style="color:#64748b;font-size:1.3vh;font-weight:700;margin-bottom:0.8vh">ผู้เล่นที่ไม่ได้เล่นวันนี้</div>
-    <div style="display:flex;flex-wrap:wrap;gap:0.8vh">
+    <div style="color:#64748b;font-size:1.3vh;font-weight:700;margin-bottom:0.8vh">เรียกกลับ</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.8vh;margin-bottom:1.5vh">
       ${absent.map(p => `<button class="add-absent-btn btn" data-id="${p.id}"
         style="background:#334155;color:#94a3b8;border-radius:10px;padding:0.8vh 1.5vh;font-size:1.6vh;font-weight:600">${p.name}</button>`).join('')}
+    </div>` : ''}
+    <!-- Remove present -->
+    ${present.length > 0 ? `
+    <div style="color:#64748b;font-size:1.3vh;font-weight:700;margin-bottom:0.8vh">พัก / ออกก่อน</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.8vh">
+      ${present.map(p => `<button class="remove-present-btn btn" data-id="${p.id}"
+        style="background:#3f1212;color:#fca5a5;border:1px solid #7f1d1d;border-radius:10px;padding:0.8vh 1.5vh;font-size:1.6vh;font-weight:600">${p.name} ✕</button>`).join('')}
     </div>` : ''}
   </div>
 </div>`;
@@ -623,13 +766,23 @@
         🎯 กำหนดแมต
       </button>
     </div>
-    ${S.mode === 'limited' ? `
+    ${S.mode === 'limited' ? (() => {
+      const cap = S.matchesPerCycle || 3;
+      const n = presentIds.length;
+      const numTeams = n > 0 ? Math.ceil(n / 2) : 0;
+      const maxPerTeam = numTeams - 1;
+      const warn = n >= 4 && cap > maxPerTeam;
+      return `
     <div style="display:flex;align-items:center;justify-content:center;gap:2vh;margin-top:1.2vh">
       <span style="color:#94a3b8;font-size:1.6vh">สูงสุด (แมต/ทีม):</span>
       <button id="matchesDecBtn" class="btn" style="background:#334155;color:#f1f5f9;border-radius:10px;width:4vh;height:4vh;font-size:2.2vh;font-weight:700;display:flex;align-items:center;justify-content:center">−</button>
-      <span style="color:#f1f5f9;font-size:2.4vh;font-weight:800;min-width:3vh;text-align:center">${S.matchesPerCycle || 3}</span>
+      <span style="color:#f1f5f9;font-size:2.4vh;font-weight:800;min-width:3vh;text-align:center">${cap}</span>
       <button id="matchesIncBtn" class="btn" style="background:#334155;color:#f1f5f9;border-radius:10px;width:4vh;height:4vh;font-size:2.2vh;font-weight:700;display:flex;align-items:center;justify-content:center">+</button>
-    </div>` : ''}
+    </div>
+    ${warn ? `<div style="margin-top:0.8vh;background:#451a00;border:1px solid #d97706;border-radius:10px;padding:0.8vh 1.2vh;font-size:1.3vh;color:#fbbf24;text-align:center">
+      ⚠️ ${n} คน = ${numTeams} ทีม → เล่นได้สูงสุดแค่ <strong>${maxPerTeam} แมต/ทีม</strong> (cap ${cap} เกินกว่าที่เป็นไปได้)
+    </div>` : ''}`;
+    })() : ''}
   </div>
 
   <button id="startBtn" class="btn" ${ok ? '' : 'disabled'}
@@ -671,6 +824,11 @@
     const pairsLeft = isLimited ? null : (cycleTotal - playedThisCycle - 1);
 
     const waitingIdxs = waitQueue || [];
+    // Can skip if another unplayed pair exists besides current
+    const _played = new Set(S.cyclePlayedPairs);
+    const _curKey = tpKey(S.courtIdx, S.challengerIdx);
+    const _pool = [...(waitQueue||[]), S.courtIdx, S.challengerIdx];
+    const canSkip = _pool.some((x,i) => _pool.some((y,j) => j>i && tpKey(x,y)!==_curKey && !_played.has(tpKey(x,y))));
 
     return `
 <div class="fade-in" style="display:flex;flex-direction:column;height:100%;gap:1.5vh">
@@ -714,7 +872,7 @@
   </div>
 
   <!-- Winner buttons -->
-  <div style="flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:1.5vh">
+  <div style="flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:1.5vh" id="winBtnsArea">
     <button class="win-btn btn" data-w="court"
       style="${C.teamA}border-radius:16px;padding:2.5vh 1vh;text-align:center;color:#bfdbfe">
       <div style="font-weight:700;font-size:1.9vh;margin-bottom:0.5vh">👑 Court ชนะ</div>
@@ -726,6 +884,9 @@
       <div style="font-size:1.5vh;color:#fca5a5">${challengerTeam.map(pname).join(' & ')}</div>
     </button>
   </div>
+  ${canSkip ? `<div style="flex-shrink:0;text-align:center">
+    <button id="skipMatchBtn" class="btn" style="background:none;color:#475569;font-size:1.5vh;padding:0.5vh 2vh;border:1px solid #334155;border-radius:10px">⏭ ข้ามแมตนี้ก่อน</button>
+  </div>` : ''}
 
   <!-- Scoreboard -->
   <div style="flex:1;overflow:hidden;min-height:0;${C.card}display:flex;flex-direction:column">
@@ -745,6 +906,15 @@
           <span style="font-weight:700;font-size:2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
         </div>`;
       }).join('')}
+      ${(S.restingIds||[]).length > 0 ? `
+      <div style="border-top:1px dashed #334155;margin-top:0.5vh;padding-top:0.5vh">
+        <div style="color:#475569;font-size:1.2vh;font-weight:700;margin-bottom:0.4vh">💤 พัก</div>
+        ${(S.restingIds||[]).map(id => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5vh 0;opacity:0.55">
+          <span style="font-size:1.6vh;color:#64748b">${pname(id)}</span>
+          <span style="font-weight:700;font-size:1.8vh;color:#475569">${scores[id]||0}</span>
+        </div>`).join('')}
+      </div>` : ''}
     </div>
   </div>
 </div>`;
@@ -786,6 +956,15 @@
           <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
         </div>`;
       }).join('')}
+      ${(S.restingIds||[]).length > 0 ? `
+      <div style="border-top:1px dashed #334155;margin-top:0.5vh;padding-top:0.5vh">
+        <div style="color:#475569;font-size:1.2vh;font-weight:700;margin-bottom:0.4vh">💤 พัก</div>
+        ${(S.restingIds||[]).map(id => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5vh 0;opacity:0.55">
+          <span style="font-size:1.6vh;color:#64748b">${pname(id)}</span>
+          <span style="font-weight:700;font-size:1.8vh;color:#475569">${(S.scores||{})[id]||0}</span>
+        </div>`).join('')}
+      </div>` : ''}
     </div>
   </div>
 
@@ -840,6 +1019,15 @@
           <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
         </div>`;
       }).join('')}
+      ${(S.restingIds||[]).length > 0 ? `
+      <div style="border-top:1px dashed #334155;margin-top:0.5vh;padding-top:0.5vh">
+        <div style="color:#475569;font-size:1.2vh;font-weight:700;margin-bottom:0.4vh">💤 พัก</div>
+        ${(S.restingIds||[]).map(id => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5vh 0;opacity:0.55">
+          <span style="font-size:1.7vh;color:#64748b">${pname(id)}</span>
+          <span style="font-weight:700;font-size:2vh;color:#475569">${(S.scores||{})[id]||0}</span>
+        </div>`).join('')}
+      </div>` : ''}
     </div>
   </div>
 
@@ -872,6 +1060,8 @@
     // Playing
     qa('.win-btn').forEach(b => b.addEventListener('click', () => recordWinner(b.dataset.w)));
     q('undoBtn')?.addEventListener('click', undoLastMatch);
+    q('skipMatchBtn')?.addEventListener('click', skipMatch);
+    q('themeToggleBtn')?.addEventListener('click', () => { theme = theme==='dark'?'light':'dark'; localStorage.setItem('bmt_theme', theme); render(); });
     q('addPlayerBtn')?.addEventListener('click', () => { showAddPlayer = true; render(); });
     q('endBtn')?.addEventListener('click', endSession);
 
@@ -887,6 +1077,7 @@
     });
     q('addMidInp')?.addEventListener('keydown', e => { if (e.key === 'Enter') { addPlayerMidGame(null, e.target.value); } });
     qa('.add-absent-btn').forEach(b => b.addEventListener('click', () => addPlayerMidGame(+b.dataset.id, null)));
+    qa('.remove-present-btn').forEach(b => b.addEventListener('click', () => removePlayerMidGame(+b.dataset.id)));
 
     // Final
     q('contBtn')?.addEventListener('click', continuePlaying);
@@ -915,6 +1106,45 @@
   }
 
   render();
+
+  // ── Pull-to-refresh ────────────────────────────────────────────────
+  (function() {
+    const ptr = document.getElementById('ptr');
+    const THRESHOLD = 75; // px pull distance to trigger
+    let startY = 0, pulling = false, released = false;
+
+    document.addEventListener('touchstart', e => {
+      if (released) return;
+      if (e.touches[0].clientY > 70) return; // only near top
+      startY = e.touches[0].clientY;
+      pulling = true;
+    }, { passive: true });
+
+    document.addEventListener('touchmove', e => {
+      if (!pulling) return;
+      const dy = Math.max(0, e.touches[0].clientY - startY);
+      const h = Math.min(dy * 0.5, THRESHOLD);
+      ptr.style.height = h + 'px';
+      const ready = dy >= THRESHOLD * 2;
+      ptr.innerHTML = `<span style="font-size:1.4vh;color:${ready ? '#4ade80' : '#64748b'};padding-bottom:1vh">${ready ? '↑ ปล่อยเพื่อ refresh' : '↓ ดึงเพื่อ refresh'}</span>`;
+    }, { passive: true });
+
+    document.addEventListener('touchend', e => {
+      if (!pulling) return;
+      pulling = false;
+      const dy = e.changedTouches[0].clientY - startY;
+      if (dy >= THRESHOLD * 2) {
+        released = true;
+        ptr.style.height = '40px';
+        ptr.innerHTML = '<span style="font-size:1.4vh;color:#4ade80;padding-bottom:1vh">🔄 กำลัง refresh…</span>';
+        setTimeout(() => location.reload(), 400);
+      } else {
+        ptr.style.transition = 'height 0.2s';
+        ptr.style.height = '0';
+        setTimeout(() => { ptr.style.transition = ''; ptr.innerHTML = ''; }, 220);
+      }
+    }, { passive: true });
+  })();
   </script>
 </body>
 </html>
