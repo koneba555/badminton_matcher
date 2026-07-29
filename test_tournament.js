@@ -119,14 +119,14 @@ console.log('\n[tournament] full single-court session simulation, 7 players, 10 
   S.dualCourt = false;
   ctx.startSession();
 
-  let matches = 0, rounds = 0, guard = 0;
-  while (rounds < 10 && guard++ < 2000) {
-    if (S.screen === 'newcycle') { ctx.startNewCycle(); rounds++; continue; }
+  let matches = 0, guard = 0;
+  while (S.cycleCount < 10 && guard++ < 2000) {
     if (S.screen !== 'playing') break;
     if (S.courtIdx == null) break; // shouldn't happen single-court
     ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger');
     matches++;
   }
+  const rounds = S.cycleCount;
   check('session ran without crashing and produced matches', matches > 10);
   check('reached at least 5 completed rounds', rounds >= 5);
   check('all present players have a score entry', S.presentIds.every(id => typeof S.scores[id] === 'number'));
@@ -144,14 +144,13 @@ console.log('\n[tournament] dual-court session simulation, 9 players, 8 rounds')
   S.dualCourt = true;
   ctx.startSession();
 
-  let matches = 0, rounds = 0, guard = 0;
+  let matches = 0, guard = 0;
   let bothIdleAtOnceViolation = false;
-  while (rounds < 8 && guard++ < 3000) {
-    if (S.screen === 'newcycle') { ctx.startNewCycle(); rounds++; continue; }
+  while (S.cycleCount < 8 && guard++ < 3000) {
     if (S.screen !== 'playing') break;
     const aReady = S.courtIdx != null && S.challengerIdx != null;
     const bReady = S.courtIdxB != null && S.challengerIdxB != null;
-    if (!aReady && !bReady) { bothIdleAtOnceViolation = true; break; } // should have transitioned to newcycle
+    if (!aReady && !bReady) { bothIdleAtOnceViolation = true; break; } // should have auto-advanced to next round
     if (aReady && (Math.random() < 0.5 || !bReady)) {
       ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
     } else if (bReady) {
@@ -159,6 +158,7 @@ console.log('\n[tournament] dual-court session simulation, 9 players, 8 rounds')
     }
     matches++;
   }
+  const rounds = S.cycleCount;
   check('never stuck with both courts idle mid-round (no soft-lock)', !bothIdleAtOnceViolation);
   check('session ran without crashing and produced matches', matches > 10);
   check('reached at least 4 completed rounds', rounds >= 4);

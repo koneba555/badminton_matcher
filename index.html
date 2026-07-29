@@ -406,7 +406,7 @@
       }
       const aDone = S.courtIdx === null;
       const bDone = !S.dualCourt || S.courtIdxB === null;
-      if (aDone && bDone) { S.screen = 'newcycle'; S.cycleCount++; }
+      if (aDone && bDone) { S.cycleCount++; initTournamentRound(); }
     } else {
       if (slotANeedsRefill) {
         if (S.courtIdx === null && S.waitQueue.length > 0) S.courtIdx = S.waitQueue.shift();
@@ -614,8 +614,11 @@
     const aDone = S.courtIdx === null;
     const bDone = !S.dualCourt || S.courtIdxB === null;
     if (aDone && bDone) {
-      S.screen = 'newcycle';
+      // Continuous swiss tournament: auto-advance to the next round instead of
+      // stopping at a "รอบจบ" screen — winners keep meeting winners, losers keep
+      // meeting losers, without interrupting play every couple of matches.
       S.cycleCount++;
+      initTournamentRound();
     }
   }
 
