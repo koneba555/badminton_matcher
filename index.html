@@ -47,9 +47,16 @@
       schedule: [],       // precomputed round-robin schedule (array of team arrays)
       scheduleIdx: 0,     // current position in schedule
       playerConsecutive: {}, // {playerId: consecutiveMatchCount} — persists across cycles
-      mode: 'full',          // 'full' = all pairs per cycle | 'limited' = each team plays N matches
+      mode: 'full',          // 'full' | 'limited' | 'tournament'
       matchesPerCycle: 3,   // used only in 'limited' mode — matches per team per cycle
       teamMatchCounts: {},  // {teamIdx: matchCount} reset each cycle
+      dualCourt: false,          // play 2 courts simultaneously
+      courtIdxB: null,           // court B team index (null = court B idle/unused)
+      challengerIdxB: null,      // court B challenger index (null = idle, waiting for other court)
+      tournamentTeams: [],       // fixed team pairs for tournament mode — set once, persists whole session
+      tournamentQueue: [],       // remaining [teamIdxA, teamIdxB] pairs for the current tournament round
+      tournamentLastResult: {},  // {teamIdx: 'win'|'loss'|'bye'} from the round in progress — feeds next round pairing
+      tournamentPlayedPairs: [], // "i,j" team-idx pairs ever played — minimizes rematches across rounds
     };
   }
 
@@ -141,71 +148,66 @@
     return usedPartnerSet().size >= total;
   }
 
-  // After each match: find next court/challenger. Returns true if cycle is complete.
-  function setupNextMatch() {
+  // Find next challenger for one court slot ('A' or 'B'). S[courtField] must already be set.
+  // Returns 'ok' (challenger assigned), 'done' (whole round/cycle complete — no unplayed pairs left anywhere),
+  // or 'blocked' (pairs remain, but none available right now because the only candidates are active on the other court).
+  function setupNextMatchForSlot(slot) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    const cIdx = S[courtField];
     const played = new Set(S.cyclePlayedPairs);
 
-    // Check cycle completion
     if (S.mode === 'limited') {
       const threshold = S.matchesPerCycle || 3;
       const tmc = S.teamMatchCounts || {};
       const N = S.teams.length;
-      // Cycle done when all teams hit cap
-      if (Array.from({length: N}, (_, i) => (tmc[i] || 0)).every(c => c >= threshold)) return true;
-      // Find next challenger: under cap AND not yet played against current court this cycle
+      if (Array.from({length: N}, (_, i) => (tmc[i] || 0)).every(c => c >= threshold)) return 'done';
       const idx = S.waitQueue.findIndex(i =>
-        (tmc[i] || 0) < threshold && !played.has(tpKey(S.courtIdx, i))
+        (tmc[i] || 0) < threshold && !played.has(tpKey(cIdx, i))
       );
-      if (idx >= 0) {
-        S.challengerIdx = S.waitQueue.splice(idx, 1)[0];
-        return false;
-      }
-      // Court exhausted all valid challengers → find any under-cap pair not yet played
-      const pool = [...S.waitQueue, S.courtIdx];
+      if (idx >= 0) { S[challField] = S.waitQueue.splice(idx, 1)[0]; return 'ok'; }
+      const pool = [...S.waitQueue, cIdx];
       const underCap = pool.filter(i => (tmc[i] || 0) < threshold);
       for (let i = 0; i < underCap.length; i++) {
         for (let j = i + 1; j < underCap.length; j++) {
           if (!played.has(tpKey(underCap[i], underCap[j]))) {
             const newCourt = underCap[i], newChallenger = underCap[j];
             S.waitQueue = pool.filter(x => x !== newCourt && x !== newChallenger);
-            S.courtIdx = newCourt;
-            S.challengerIdx = newChallenger;
-            return false;
+            S[courtField] = newCourt;
+            S[challField] = newChallenger;
+            return 'ok';
           }
         }
       }
-      // No valid unplayed pair among under-cap teams → end cycle
-      return true;
+      const stillPending = Array.from({length: N}, (_, i) => i).some(i => (tmc[i] || 0) < threshold);
+      return stillPending ? 'blocked' : 'done';
     }
 
     // Full mode: play all C(N,2) team pairs
     const N = S.teams.length;
     const total = N * (N - 1) / 2;
-    if (played.size >= total) return true; // cycle done
+    if (played.size >= total) return 'done';
 
-    // Try: current court vs first unplayed team in waitQueue
     for (let i = 0; i < S.waitQueue.length; i++) {
-      if (!played.has(tpKey(S.courtIdx, S.waitQueue[i]))) {
-        S.challengerIdx = S.waitQueue.splice(i, 1)[0];
-        return false;
+      if (!played.has(tpKey(cIdx, S.waitQueue[i]))) {
+        S[challField] = S.waitQueue.splice(i, 1)[0];
+        return 'ok';
       }
     }
 
-    // Court has played everyone → find any unplayed pair in full pool
-    // pool = waitQueue + courtIdx (challenger was already pushed to waitQueue by caller)
-    const pool = [...S.waitQueue, S.courtIdx];
+    const pool = [...S.waitQueue, cIdx];
     for (let i = 0; i < pool.length; i++) {
       for (let j = i + 1; j < pool.length; j++) {
         if (!played.has(tpKey(pool[i], pool[j]))) {
           const newCourt = pool[i], newChallenger = pool[j];
           S.waitQueue = pool.filter(x => x !== newCourt && x !== newChallenger);
-          S.courtIdx = newCourt;
-          S.challengerIdx = newChallenger;
-          return false;
+          S[courtField] = newCourt;
+          S[challField] = newChallenger;
+          return 'ok';
         }
       }
     }
-    return true;
+    return 'blocked'; // unplayed pairs remain but only involve teams active on the other court
   }
 
   // Shuffle array in place (Fisher-Yates)
@@ -249,6 +251,54 @@
     });
   }
 
+  // Fixed team formation for tournament mode — set once, persists whole session
+  function buildFixedTeams(ids) {
+    const shuffled = shuffle([...ids]);
+    const teams = [];
+    for (let i = 0; i + 1 < shuffled.length; i += 2) teams.push([shuffled[i], shuffled[i + 1]]);
+    if (shuffled.length % 2 === 1) teams.push([shuffled[shuffled.length - 1]]);
+    return teams;
+  }
+
+  // Swiss-style round pairing: winners bucket faces winners, losers bucket faces losers.
+  // lastResult = {teamIdx: 'win'|'loss'|'bye'} from the previous round (empty on round 1 = everyone in one pool).
+  // Odd-sized bucket gets one leftover cross-paired against the other bucket's leftover, or a bye if both odd/only one bucket.
+  // Best-effort avoids immediate rematches using playedPairs history (tries a few shuffles, keeps the one with fewest repeats).
+  function buildTournamentRound(teamCount, lastResult, playedPairs) {
+    const played = new Set(playedPairs || []);
+    function attempt() {
+      const idxs = Array.from({ length: teamCount }, (_, i) => i);
+      let winners, losers;
+      if (!lastResult || Object.keys(lastResult).length === 0) {
+        winners = shuffle([...idxs]);
+        losers = [];
+      } else {
+        winners = shuffle(idxs.filter(i => lastResult[i] !== 'loss'));
+        losers = shuffle(idxs.filter(i => lastResult[i] === 'loss'));
+      }
+      function pairUp(group) {
+        const pairs = [];
+        for (let i = 0; i + 1 < group.length; i += 2) pairs.push([group[i], group[i + 1]]);
+        const leftover = group.length % 2 === 1 ? group[group.length - 1] : null;
+        return { pairs, leftover };
+      }
+      const w = pairUp(winners), l = pairUp(losers);
+      const queue = [...w.pairs, ...l.pairs];
+      let byes = [];
+      if (w.leftover !== null && l.leftover !== null) queue.push([w.leftover, l.leftover]);
+      else if (w.leftover !== null) byes = [w.leftover];
+      else if (l.leftover !== null) byes = [l.leftover];
+      const repeats = queue.filter(([a, b]) => played.has(tpKey(a, b))).length;
+      return { queue: shuffle(queue), byes, repeats };
+    }
+    let best = attempt();
+    for (let t = 0; t < 25 && best.repeats > 0; t++) {
+      const cand = attempt();
+      if (cand.repeats < best.repeats) best = cand;
+    }
+    return { queue: best.queue, byes: best.byes };
+  }
+
   // ── Actions ────────────────────────────────────────────────────────
   function addPlayer(name) {
     name = name.trim().slice(0, 20);
@@ -283,12 +333,14 @@
     if (remaining.length > 0) {
       // Partner stays → team shrinks to solo, no index remap needed
       S.teams[teamIdx] = remaining;
+      if (S.mode === 'tournament') S.tournamentTeams[teamIdx] = remaining;
       if (S.lastSoloId === id) S.lastSoloId = remaining[0];
       showAddPlayer = false; save(); render(); return;
     }
 
     // Remove entire team → remap all team indices
     S.teams.splice(teamIdx, 1);
+    if (S.mode === 'tournament') S.tournamentTeams.splice(teamIdx, 1);
     const gone = i => i === teamIdx;
     const remap = i => i > teamIdx ? i - 1 : i;
 
@@ -303,26 +355,76 @@
     });
     S.teamMatchCounts = newTmc;
 
+    if (S.mode === 'tournament') {
+      S.tournamentQueue = (S.tournamentQueue || [])
+        .filter(([a,b]) => !gone(a) && !gone(b))
+        .map(([a,b]) => [remap(a), remap(b)]);
+      S.tournamentPlayedPairs = (S.tournamentPlayedPairs || [])
+        .filter(k => { const [a,b]=k.split(',').map(Number); return !gone(a)&&!gone(b); })
+        .map(k => { const [a,b]=k.split(',').map(Number); return tpKey(remap(a),remap(b)); });
+      const newLr = {};
+      Object.entries(S.tournamentLastResult||{}).forEach(([k,v]) => {
+        const idx=parseInt(k);
+        if(!gone(idx)) newLr[remap(idx)]=v;
+      });
+      S.tournamentLastResult = newLr;
+    }
+
+    // Which court slots lost their occupant?
+    const slotANeedsRefill = gone(S.courtIdx) || gone(S.challengerIdx);
+    const slotBNeedsRefill = S.dualCourt && (gone(S.courtIdxB) || gone(S.challengerIdxB));
+
     if (gone(S.courtIdx)) {
-      // Court left → push old challenger back to queue, pick new court
-      S.waitQueue.push(S.challengerIdx);
-      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
-      if (S.waitQueue.length > 0) {
-        S.courtIdx = S.waitQueue.shift();
-        const done = setupNextMatch();
-        if (done) { S.screen='newcycle'; S.cycleCount++; }
-      } else { S.screen='newcycle'; S.cycleCount++; }
+      if (S.challengerIdx != null) S.waitQueue.push(S.challengerIdx);
+      S.courtIdx = null; S.challengerIdx = null;
     } else if (gone(S.challengerIdx)) {
-      // Challenger left → court stays, find new challenger
-      S.courtIdx = remap(S.courtIdx);
-      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
-      const done = setupNextMatch();
-      if (done) { S.screen='newcycle'; S.cycleCount++; }
+      S.challengerIdx = null;
+    }
+    if (S.dualCourt) {
+      if (gone(S.courtIdxB)) {
+        if (S.challengerIdxB != null) S.waitQueue.push(S.challengerIdxB);
+        S.courtIdxB = null; S.challengerIdxB = null;
+      } else if (gone(S.challengerIdxB)) {
+        S.challengerIdxB = null;
+      }
+    }
+
+    S.waitQueue = (S.waitQueue||[]).filter(i=>!gone(i)).map(remap);
+    if (S.courtIdx != null) S.courtIdx = remap(S.courtIdx);
+    if (S.challengerIdx != null) S.challengerIdx = remap(S.challengerIdx);
+    if (S.courtIdxB != null) S.courtIdxB = remap(S.courtIdxB);
+    if (S.challengerIdxB != null) S.challengerIdxB = remap(S.challengerIdxB);
+
+    if (S.mode === 'tournament') {
+      if (slotANeedsRefill) {
+        const next = S.tournamentQueue.shift();
+        if (next) { S.courtIdx = next[0]; S.challengerIdx = next[1]; } else { S.courtIdx = null; S.challengerIdx = null; }
+      }
+      if (slotBNeedsRefill) {
+        const next = S.tournamentQueue.shift();
+        if (next) { S.courtIdxB = next[0]; S.challengerIdxB = next[1]; } else { S.courtIdxB = null; S.challengerIdxB = null; }
+      }
+      const aDone = S.courtIdx === null;
+      const bDone = !S.dualCourt || S.courtIdxB === null;
+      if (aDone && bDone) { S.screen = 'newcycle'; S.cycleCount++; }
     } else {
-      // Removed team was in waitQueue
-      S.courtIdx = remap(S.courtIdx);
-      S.challengerIdx = remap(S.challengerIdx);
-      S.waitQueue = S.waitQueue.filter(i=>!gone(i)).map(remap);
+      if (slotANeedsRefill) {
+        if (S.courtIdx === null && S.waitQueue.length > 0) S.courtIdx = S.waitQueue.shift();
+        if (S.courtIdx != null) {
+          const r = setupNextMatchForSlot('A');
+          if (r !== 'ok') S.challengerIdx = null;
+        }
+      }
+      if (slotBNeedsRefill) {
+        if (S.courtIdxB === null && S.waitQueue.length > 0) S.courtIdxB = S.waitQueue.shift();
+        if (S.courtIdxB != null) {
+          const r = setupNextMatchForSlot('B');
+          if (r !== 'ok') S.challengerIdxB = null;
+        }
+      }
+      const aFinished = S.courtIdx === null;
+      const bFinished = !S.dualCourt || S.courtIdxB === null;
+      if (aFinished && bFinished) { S.screen = 'newcycle'; S.cycleCount++; }
     }
 
     if (S.lastSoloId === id) S.lastSoloId = null;
@@ -349,6 +451,8 @@
     S.courtIdx     = fatigue[0].i;
     S.challengerIdx = fatigue[1].i;
     S.waitQueue    = fatigue.slice(2).map(x => x.i);
+    S.courtIdxB = null;
+    S.challengerIdxB = null;
 
     // Teams starting in waitQueue sit out match 1 → reset their counts now
     S.waitQueue.forEach(tIdx => {
@@ -363,12 +467,55 @@
         if (!S.usedPartners.includes(k)) S.usedPartners.push(k);
       }
     });
+
+    // Dual-court: seed court B with a second match from the same pool
+    if (S.dualCourt && S.waitQueue.length > 0) {
+      S.courtIdxB = S.waitQueue.shift();
+      setupNextMatchForSlot('B');
+    }
+  }
+
+  function initTournamentRound() {
+    S.teams = S.tournamentTeams;
+    const { queue, byes } = buildTournamentRound(S.teams.length, S.tournamentLastResult || {}, S.tournamentPlayedPairs || []);
+    S.tournamentQueue = queue;
+    S.tournamentLastResult = {};
+    byes.forEach(idx => { S.tournamentLastResult[idx] = 'bye'; });
+    S.cyclePlayedPairs = [];
+    S.courtIdx = null;
+    S.challengerIdx = null;
+    S.courtIdxB = null;
+    S.challengerIdxB = null;
+    const first = S.tournamentQueue.shift();
+    if (first) { S.courtIdx = first[0]; S.challengerIdx = first[1]; }
+    if (S.dualCourt) {
+      const second = S.tournamentQueue.shift();
+      if (second) { S.courtIdxB = second[0]; S.challengerIdxB = second[1]; }
+    }
   }
 
   function startSession() {
     if (S.presentIds.length < 4) return;
     undoStack = [];
     deleteMode = false;
+    if (S.mode === 'tournament') {
+      S.tournamentTeams = buildFixedTeams(S.presentIds);
+      S.tournamentPlayedPairs = [];
+      S.tournamentLastResult = {};
+      Object.assign(S, {
+        screen: 'playing',
+        rounds: [],
+        scores: Object.fromEntries(S.presentIds.map(id => [id, 0])),
+        usedPartners: [],
+        cycleCount: 1,
+        schedule: [],
+        scheduleIdx: -1,
+        playerConsecutive: {},
+      });
+      initTournamentRound();
+      save(); render();
+      return;
+    }
     const schedule = buildSchedule(shuffle([...S.presentIds]));
     Object.assign(S, {
       screen: 'playing',
@@ -403,8 +550,12 @@
     S.restingIds = (S.restingIds||[]).filter(x => x !== id);
     if (!S.scores) S.scores = {};
     S.scores[id] = S.scores[id] || 0;
-    // Inject as new team into current cycle's wait queue
-    if (S.screen === 'playing' || S.screen === 'newcycle') {
+    if (S.mode === 'tournament' && (S.screen === 'playing' || S.screen === 'newcycle')) {
+      // New solo team sits out the current round; joins pairing from next round onward
+      S.teams.push([id]);
+      S.tournamentTeams.push([id]);
+    } else if (S.screen === 'playing' || S.screen === 'newcycle') {
+      // Inject as new team into current cycle's wait queue
       const newTeamIdx = S.teams.length;
       S.teams.push([id]);
       S.waitQueue.push(newTeamIdx);
@@ -418,73 +569,117 @@
     save(); render();
   }
 
-  function recordWinner(winner) {
+  function recordWinner(winner, slot) {
+    slot = slot || 'A';
     undoStack.push(JSON.parse(JSON.stringify(S)));
-    const courtTeam = [...S.teams[S.courtIdx]];
-    const challengerTeam = [...S.teams[S.challengerIdx]];
+
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    const courtI = S[courtField];
+    const challI = S[challField];
+    const courtTeam = [...S.teams[courtI]];
+    const challengerTeam = [...S.teams[challI]];
 
     S.rounds.push({ id: S.rounds.length + 1, courtTeam, challengerTeam, winner, cycle: S.cycleCount });
-
-    // Scores
     (winner === 'court' ? courtTeam : challengerTeam)
       .forEach(id => S.scores[id] = (S.scores[id] || 0) + 1);
 
-    // Track played pair
-    S.cyclePlayedPairs.push(tpKey(S.courtIdx, S.challengerIdx));
+    if (S.mode === 'tournament') {
+      recordWinnerTournament(slot, courtI, challI, winner);
+    } else {
+      recordWinnerStandard(slot, courtI, challI, winner);
+    }
 
-    // Winner stays on court, loser to back of waitQueue
-    const loserIdx = winner === 'court' ? S.challengerIdx : S.courtIdx;
-    const winnerIdx = winner === 'court' ? S.courtIdx : S.challengerIdx;
+    save(); render();
+  }
+
+  function recordWinnerTournament(slot, courtI, challI, winner) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    const winIdx = winner === 'court' ? courtI : challI;
+    const loseIdx = winner === 'court' ? challI : courtI;
+    S.tournamentLastResult[winIdx] = 'win';
+    S.tournamentLastResult[loseIdx] = 'loss';
+    S.tournamentPlayedPairs = [...(S.tournamentPlayedPairs || []), tpKey(courtI, challI)];
+
+    const next = S.tournamentQueue.shift();
+    if (next) {
+      S[courtField] = next[0];
+      S[challField] = next[1];
+    } else {
+      S[courtField] = null;
+      S[challField] = null;
+    }
+
+    const aDone = S.courtIdx === null;
+    const bDone = !S.dualCourt || S.courtIdxB === null;
+    if (aDone && bDone) {
+      S.screen = 'newcycle';
+      S.cycleCount++;
+    }
+  }
+
+  function recordWinnerStandard(slot, courtI, challI, winner) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+
+    S.cyclePlayedPairs.push(tpKey(courtI, challI));
+
+    const loserIdx = winner === 'court' ? challI : courtI;
+    const winnerIdx = winner === 'court' ? courtI : challI;
     S.waitQueue.push(loserIdx);
 
-    // Track per-team match count this cycle (for limited mode cycle completion)
     const tmc = S.teamMatchCounts || {};
-    tmc[S.courtIdx]     = (tmc[S.courtIdx]     || 0) + 1;
-    tmc[S.challengerIdx] = (tmc[S.challengerIdx] || 0) + 1;
+    tmc[courtI] = (tmc[courtI] || 0) + 1;
+    tmc[challI] = (tmc[challI] || 0) + 1;
     S.teamMatchCounts = tmc;
 
-    // Update per-player consecutive counts (persists across cycles)
     const pc = S.playerConsecutive || {};
-    // Teams in waitQueue BEFORE this match were sitting out → reset their counts
-    // (loser just joined queue; the rest were already waiting)
-    S.waitQueue.slice(0, -1).forEach(tIdx => {   // all except the loser we just pushed
-      S.teams[tIdx].forEach(pid => { pc[pid] = 0; });
+    const otherActive = slot === 'A' ? [S.courtIdxB, S.challengerIdxB] : [S.courtIdx, S.challengerIdx];
+    S.waitQueue.slice(0, -1).forEach(tIdx => {
+      if (!otherActive.includes(tIdx)) S.teams[tIdx].forEach(pid => { pc[pid] = 0; });
     });
-    // Both court and challenger just played → increment
-    [...S.teams[S.courtIdx], ...S.teams[S.challengerIdx]].forEach(pid => {
-      pc[pid] = (pc[pid] || 0) + 1;
-    });
+    [...S.teams[courtI], ...S.teams[challI]].forEach(pid => { pc[pid] = (pc[pid] || 0) + 1; });
     S.playerConsecutive = pc;
 
-    // Decide whether winner must rest
     const winnerFatigue = Math.max(0, ...S.teams[winnerIdx].map(pid => pc[pid] || 0));
     const threshold = S.matchesPerCycle || 3;
-    // In limited mode: also rotate if winner hit the match cap
     const hitCap = S.mode === 'limited' && (tmc[winnerIdx] || 0) >= threshold;
     const mustRest = (winnerFatigue >= 2 || hitCap) && S.waitQueue.length > 0;
 
     if (mustRest) {
       S.waitQueue.push(winnerIdx);
       if (S.mode === 'limited') {
-        // Prefer a team that hasn't hit the cap yet as new court
         const pos = S.waitQueue.findIndex(i => (tmc[i] || 0) < threshold);
-        S.courtIdx = pos >= 0 ? S.waitQueue.splice(pos, 1)[0] : S.waitQueue.shift();
+        S[courtField] = pos >= 0 ? S.waitQueue.splice(pos, 1)[0] : S.waitQueue.shift();
       } else {
-        S.courtIdx = S.waitQueue.shift(); // FIFO for full mode
+        S[courtField] = S.waitQueue.shift();
       }
     } else {
-      S.courtIdx = winnerIdx;
+      S[courtField] = winnerIdx;
     }
 
-    // Find next match — if cycle done go to newcycle screen
-    const done = setupNextMatch();
-    if (done) { S.screen = 'newcycle'; S.cycleCount++; }
+    const result = setupNextMatchForSlot(slot);
+    if (result !== 'ok') S[challField] = null;
 
-    save(); render();
+    const otherChallField = slot === 'A' ? 'challengerIdxB' : 'challengerIdx';
+    const otherCourtActive = S.dualCourt && S[otherChallField] != null;
+
+    if ((result === 'done' || result === 'blocked') && !otherCourtActive) {
+      // 'blocked' with no active other court shouldn't happen structurally, but resolve as done to avoid a soft-lock
+      S.screen = 'newcycle';
+      S.cycleCount++;
+    }
   }
 
   function startNewCycle() {
     undoStack.push(JSON.parse(JSON.stringify(S)));
+    if (S.mode === 'tournament') {
+      S.screen = 'playing';
+      initTournamentRound();
+      save(); render();
+      return;
+    }
     let schedule = S.schedule || [];
     let nextIdx = (S.scheduleIdx ?? -1) + 1;
     if (nextIdx >= schedule.length) {
@@ -500,6 +695,14 @@
   }
 
   function skipMatch() {
+    if (S.dualCourt) return; // not supported alongside dual-court
+    if (S.mode === 'tournament') {
+      if (S.tournamentQueue.length === 0) return; // nothing else to swap to
+      S.tournamentQueue.push([S.courtIdx, S.challengerIdx]);
+      const next = S.tournamentQueue.shift();
+      S.courtIdx = next[0]; S.challengerIdx = next[1];
+      save(); render(); return;
+    }
     const played = new Set(S.cyclePlayedPairs);
     const curKey = tpKey(S.courtIdx, S.challengerIdx);
     const pool = [...S.waitQueue, S.courtIdx, S.challengerIdx];
@@ -756,14 +959,18 @@
   <!-- Mode selector -->
   <div style="flex-shrink:0;${C.card}padding:1.2vh 1.5vh">
     <div style="color:#64748b;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:1vh">โหมด</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1vh">
-      <button id="modeFullBtn" class="btn" style="padding:1.2vh;border-radius:12px;font-size:1.7vh;font-weight:700;
-        background:${S.mode !== 'limited' ? '#1d4ed8' : '#334155'};color:${S.mode !== 'limited' ? '#fff' : '#94a3b8'}">
-        🔄 ตีครบทุกคู่
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.8vh">
+      <button id="modeFullBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
+        background:${S.mode === 'full' ? '#1d4ed8' : '#334155'};color:${S.mode === 'full' ? '#fff' : '#94a3b8'}">
+        🔄 ครบทุกคู่
       </button>
-      <button id="modeLimitedBtn" class="btn" style="padding:1.2vh;border-radius:12px;font-size:1.7vh;font-weight:700;
+      <button id="modeLimitedBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
         background:${S.mode === 'limited' ? '#7c3aed' : '#334155'};color:${S.mode === 'limited' ? '#fff' : '#94a3b8'}">
         🎯 กำหนดแมต
+      </button>
+      <button id="modeTournamentBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
+        background:${S.mode === 'tournament' ? '#d97706' : '#334155'};color:${S.mode === 'tournament' ? '#fff' : '#94a3b8'}">
+        🏆 Tournament
       </button>
     </div>
     ${S.mode === 'limited' ? (() => {
@@ -783,6 +990,13 @@
       ⚠️ ${n} คน = ${numTeams} ทีม → เล่นได้สูงสุดแค่ <strong>${maxPerTeam} แมต/ทีม</strong> (cap ${cap} เกินกว่าที่เป็นไปได้)
     </div>` : ''}`;
     })() : ''}
+    ${S.mode === 'tournament' ? `
+    <div style="margin-top:1vh;text-align:center;color:#94a3b8;font-size:1.3vh">คู่ที่ตั้งไว้จะคงที่ทั้งเซสชัน · ชนะเจอชนะ แพ้เจอแพ้ทุกรอบ</div>
+    ` : ''}
+    <button id="dualCourtBtn" class="btn" style="margin-top:1.2vh;width:100%;padding:1vh;border-radius:12px;font-size:1.6vh;font-weight:700;
+      background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">
+      🏟️🏟️ เล่น 2 คอร์ดพร้อมกัน ${S.dualCourt ? '✓' : ''}
+    </button>
   </div>
 
   <button id="startBtn" class="btn" ${ok ? '' : 'disabled'}
@@ -801,10 +1015,63 @@
   }
 
   // ── Playing Screen ─────────────────────────────────────────────────
+  function renderMatchCard(slot) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    const courtI = S[courtField];
+    const challI = S[challField];
+    const label = S.dualCourt ? `<div style="text-align:center;color:#64748b;font-size:1.3vh;font-weight:700;margin-bottom:0.8vh">🏟️ คอร์ด ${slot}</div>` : '';
+
+    if (courtI === null || courtI === undefined) {
+      return `<div style="flex-shrink:0;${C.card}text-align:center;color:#475569;font-size:1.6vh;padding:2.5vh 1vh">${label}คอร์ดนี้จบแล้ว รอรอบถัดไป</div>`;
+    }
+    if (challI === null || challI === undefined) {
+      return `<div style="flex-shrink:0;${C.card}text-align:center;padding:2vh 1vh">
+        ${label}
+        <div style="font-weight:700;color:#93c5fd;font-size:2vh;margin-bottom:0.6vh">${S.teams[courtI].map(pname).join(' & ')}</div>
+        <div style="color:#64748b;font-size:1.5vh">⏳ รออีกคอร์ดเล่นจบก่อน</div>
+      </div>`;
+    }
+    const courtTeam = S.teams[courtI], challengerTeam = S.teams[challI];
+    return `
+  <div style="flex-shrink:0;${C.card}">
+    ${label}
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:1vh;align-items:center">
+      <div style="text-align:center">
+        <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
+          👑 COURT${courtTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
+        </div>
+        ${courtTeam.map(id => `<div style="font-weight:700;color:#93c5fd;font-size:${S.dualCourt ? 2.0 : 2.4}vh;line-height:1.4">${pname(id)}</div>`).join('')}
+      </div>
+      <div style="font-size:${S.dualCourt ? 2.4 : 2.8}vh;font-weight:900;color:#475569;padding:0 1vh">VS</div>
+      <div style="text-align:center">
+        <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
+          ⚡ CHALLENGER${challengerTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
+        </div>
+        ${challengerTeam.map(id => `<div style="font-weight:700;color:#fca5a5;font-size:${S.dualCourt ? 2.0 : 2.4}vh;line-height:1.4">${pname(id)}</div>`).join('')}
+      </div>
+    </div>
+    ${!S.dualCourt && (S.waitQueue||[]).length > 0 && S.mode !== 'tournament' ? `
+    <div style="margin-top:1.2vh;padding-top:1.2vh;border-top:1px solid #334155;text-align:center;color:#64748b;font-size:1.5vh">
+      รอ: ${S.waitQueue.map(i => S.teams[i].map(pname).join(' & ')).join(' · ')}
+    </div>` : ''}
+  </div>
+  <div style="flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:${S.dualCourt ? 1 : 1.5}vh">
+    <button class="win-btn btn" data-slot="${slot}" data-w="court"
+      style="${C.teamA}border-radius:16px;padding:${S.dualCourt ? 1.6 : 2.5}vh 1vh;text-align:center;color:#bfdbfe">
+      <div style="font-weight:700;font-size:${S.dualCourt ? 1.6 : 1.9}vh;margin-bottom:0.5vh">👑 Court ชนะ</div>
+      <div style="font-size:${S.dualCourt ? 1.3 : 1.5}vh;color:#93c5fd">${courtTeam.map(pname).join(' & ')}</div>
+    </button>
+    <button class="win-btn btn" data-slot="${slot}" data-w="challenger"
+      style="${C.teamB}border-radius:16px;padding:${S.dualCourt ? 1.6 : 2.5}vh 1vh;text-align:center;color:#fecaca">
+      <div style="font-weight:700;font-size:${S.dualCourt ? 1.6 : 1.9}vh;margin-bottom:0.5vh">⚡ Challenger ชนะ</div>
+      <div style="font-size:${S.dualCourt ? 1.3 : 1.5}vh;color:#fca5a5">${challengerTeam.map(pname).join(' & ')}</div>
+    </button>
+  </div>`;
+  }
+
   function renderPlaying() {
-    const { teams, courtIdx, challengerIdx, waitQueue, rounds, cycleCount, scores, cyclePlayedPairs } = S;
-    const courtTeam = teams[courtIdx];
-    const challengerTeam = teams[challengerIdx];
+    const { teams, rounds, cycleCount, scores, waitQueue, cyclePlayedPairs } = S;
 
     const board = S.presentIds
       .map(id => ({ id, name: pname(id), score: scores[id] || 0 }))
@@ -814,21 +1081,28 @@
     const N = teams.length;
     const playedThisCycle = (cyclePlayedPairs || []).length;
     const isLimited = S.mode === 'limited';
+    const isTournament = S.mode === 'tournament';
     const threshold = S.matchesPerCycle || 3;
     const tmc = S.teamMatchCounts || {};
-    // In limited mode: count teams that still need more matches
     const teamsNotDone = isLimited
       ? Array.from({length: N}, (_, i) => i).filter(i => (tmc[i] || 0) < threshold).length
       : 0;
-    const cycleTotal = isLimited ? null : N * (N - 1) / 2;
-    const pairsLeft = isLimited ? null : (cycleTotal - playedThisCycle - 1);
+    const cycleTotal = (!isLimited && !isTournament) ? N * (N - 1) / 2 : null;
+    const activeMatches = (S.courtIdx != null ? 1 : 0) + (S.dualCourt && S.courtIdxB != null ? 1 : 0);
+    const pairsLeft = cycleTotal != null ? (cycleTotal - playedThisCycle - activeMatches) : null;
 
-    const waitingIdxs = waitQueue || [];
-    // Can skip if another unplayed pair exists besides current
-    const _played = new Set(S.cyclePlayedPairs);
-    const _curKey = tpKey(S.courtIdx, S.challengerIdx);
-    const _pool = [...(waitQueue||[]), S.courtIdx, S.challengerIdx];
-    const canSkip = _pool.some((x,i) => _pool.some((y,j) => j>i && tpKey(x,y)!==_curKey && !_played.has(tpKey(x,y))));
+    // Can skip if another unplayed pair exists besides current (single-court only)
+    let canSkip = false;
+    if (!S.dualCourt) {
+      if (isTournament) {
+        canSkip = S.tournamentQueue.length > 0;
+      } else {
+        const _played = new Set(S.cyclePlayedPairs);
+        const _curKey = tpKey(S.courtIdx, S.challengerIdx);
+        const _pool = [...(waitQueue||[]), S.courtIdx, S.challengerIdx];
+        canSkip = _pool.some((x,i) => _pool.some((y,j) => j>i && tpKey(x,y)!==_curKey && !_played.has(tpKey(x,y))));
+      }
+    }
 
     return `
 <div class="fade-in" style="display:flex;flex-direction:column;height:100%;gap:1.5vh">
@@ -846,44 +1120,13 @@
     </div>
   </div>
 
-  <!-- Match card -->
-  <div style="flex-shrink:0;${C.card}">
-    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:1vh;align-items:center">
-      <!-- Court team -->
-      <div style="text-align:center">
-        <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
-          👑 COURT${courtTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
-        </div>
-        ${courtTeam.map(id => `<div style="font-weight:700;color:#93c5fd;font-size:2.4vh;line-height:1.4">${pname(id)}</div>`).join('')}
-      </div>
-      <div style="font-size:2.8vh;font-weight:900;color:#475569;padding:0 1vh">VS</div>
-      <!-- Challenger team -->
-      <div style="text-align:center">
-        <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
-          ⚡ CHALLENGER${challengerTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
-        </div>
-        ${challengerTeam.map(id => `<div style="font-weight:700;color:#fca5a5;font-size:2.4vh;line-height:1.4">${pname(id)}</div>`).join('')}
-      </div>
-    </div>
-    ${waitingIdxs.length > 0 ? `
-    <div style="margin-top:1.2vh;padding-top:1.2vh;border-top:1px solid #334155;text-align:center;color:#64748b;font-size:1.5vh">
-      รอ: ${waitingIdxs.map(i => teams[i].map(pname).join(' & ')).join(' · ')}
-    </div>` : ''}
-  </div>
+  ${S.dualCourt
+    ? `<div style="flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:1vh">
+        <div style="display:flex;flex-direction:column;gap:1vh">${renderMatchCard('A')}</div>
+        <div style="display:flex;flex-direction:column;gap:1vh">${renderMatchCard('B')}</div>
+      </div>`
+    : renderMatchCard('A')}
 
-  <!-- Winner buttons -->
-  <div style="flex-shrink:0;display:grid;grid-template-columns:1fr 1fr;gap:1.5vh" id="winBtnsArea">
-    <button class="win-btn btn" data-w="court"
-      style="${C.teamA}border-radius:16px;padding:2.5vh 1vh;text-align:center;color:#bfdbfe">
-      <div style="font-weight:700;font-size:1.9vh;margin-bottom:0.5vh">👑 Court ชนะ</div>
-      <div style="font-size:1.5vh;color:#93c5fd">${courtTeam.map(pname).join(' & ')}</div>
-    </button>
-    <button class="win-btn btn" data-w="challenger"
-      style="${C.teamB}border-radius:16px;padding:2.5vh 1vh;text-align:center;color:#fecaca">
-      <div style="font-weight:700;font-size:1.9vh;margin-bottom:0.5vh">⚡ Challenger ชนะ</div>
-      <div style="font-size:1.5vh;color:#fca5a5">${challengerTeam.map(pname).join(' & ')}</div>
-    </button>
-  </div>
   ${canSkip ? `<div style="flex-shrink:0;text-align:center">
     <button id="skipMatchBtn" class="btn" style="background:none;color:#475569;font-size:1.5vh;padding:0.5vh 2vh;border:1px solid #334155;border-radius:10px">⏭ ข้ามแมตนี้ก่อน</button>
   </div>` : ''}
@@ -891,9 +1134,11 @@
   <!-- Scoreboard -->
   <div style="flex:1;overflow:hidden;min-height:0;${C.card}display:flex;flex-direction:column">
     <div style="color:#64748b;font-size:1.4vh;font-weight:700;letter-spacing:.1em;margin-bottom:1vh;flex-shrink:0">
-      SCOREBOARD · ${rounds.length} แมตช์ · ${isLimited
-        ? (teamsNotDone > 0 ? `อีก ${teamsNotDone} ทีมยังไม่ครบ ${threshold} แมต` : 'ทุกทีมครบแล้ว!')
-        : (pairsLeft > 0 ? `อีก ${pairsLeft} แมตช์จับคู่ใหม่` : 'แมตช์สุดท้ายรอบนี้')}
+      SCOREBOARD · ${rounds.length} แมตช์ · ${isTournament
+        ? `เหลืออีก ${S.tournamentQueue.length} คู่ในรอบนี้`
+        : isLimited
+          ? (teamsNotDone > 0 ? `อีก ${teamsNotDone} ทีมยังไม่ครบ ${threshold} แมต` : 'ทุกทีมครบแล้ว!')
+          : (pairsLeft > 0 ? `อีก ${pairsLeft} แมตช์จับคู่ใหม่` : 'แมตช์สุดท้ายรอบนี้')}
     </div>
     <div style="overflow-y:auto;flex:1">
       ${board.map((p, i) => {
@@ -935,7 +1180,7 @@
     <h1 style="font-size:2.5vh;font-weight:800;margin-top:0.5vh">รอบ ${cycleCount - 1} จบแล้ว!</h1>
     <p style="color:#94a3b8;font-size:1.7vh;margin-top:0.3vh">จับคู่ใหม่</p>
   </div>
-  ${allPartnersUsed() ? `
+  ${S.mode !== 'tournament' && allPartnersUsed() ? `
   <div style="flex-shrink:0;background:#1e3a2f;border:1px solid #16a34a;border-radius:14px;padding:1.2vh 1.5vh;text-align:center">
     <div style="font-size:1.8vh;font-weight:700;color:#4ade80">🎉 จับคู่ครบทุก combination แล้ว!</div>
     <div style="font-size:1.4vh;color:#86efac;margin-top:0.3vh">รอบถัดไปจะเริ่มซ้ำคู่เดิม</div>
@@ -1054,11 +1299,13 @@
     q('toggleDelBtn')?.addEventListener('click', () => { deleteMode = !deleteMode; render(); });
     q('modeFullBtn')?.addEventListener('click', () => { S.mode = 'full'; save(); render(); });
     q('modeLimitedBtn')?.addEventListener('click', () => { S.mode = 'limited'; save(); render(); });
+    q('modeTournamentBtn')?.addEventListener('click', () => { S.mode = 'tournament'; save(); render(); });
+    q('dualCourtBtn')?.addEventListener('click', () => { S.dualCourt = !S.dualCourt; save(); render(); });
     q('matchesDecBtn')?.addEventListener('click', () => { S.matchesPerCycle = Math.max(1, (S.matchesPerCycle || 3) - 1); save(); render(); });
     q('matchesIncBtn')?.addEventListener('click', () => { S.matchesPerCycle = Math.min(30, (S.matchesPerCycle || 3) + 1); save(); render(); });
 
     // Playing
-    qa('.win-btn').forEach(b => b.addEventListener('click', () => recordWinner(b.dataset.w)));
+    qa('.win-btn').forEach(b => b.addEventListener('click', () => recordWinner(b.dataset.w, b.dataset.slot)));
     q('undoBtn')?.addEventListener('click', undoLastMatch);
     q('skipMatchBtn')?.addEventListener('click', skipMatch);
     q('themeToggleBtn')?.addEventListener('click', () => { theme = theme==='dark'?'light':'dark'; localStorage.setItem('bmt_theme', theme); render(); });
