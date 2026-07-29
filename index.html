@@ -800,31 +800,50 @@
     save(); render();
   }
 
-  function skipMatch() {
-    if (S.dualCourt) return; // not supported alongside dual-court
+  // Whether a bench swap is available for this court slot: some team waiting on the bench
+  // could take this match's place right now (e.g. a pair on court isn't ready to play).
+  function canSkipSlot(slot) {
+    if (S.mode === 'tournament') return false;
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    if (S[courtField] == null || S[challField] == null) return false;
+    const played = new Set(S.cyclePlayedPairs);
+    const curKey = tpKey(S[courtField], S[challField]);
+    const pool = [...S.waitQueue, S[courtField], S[challField]];
+    return pool.some((x, i) => pool.some((y, j) =>
+      j > i && tpKey(x, y) !== curKey && !played.has(tpKey(x, y)) && isPairAllowed(x, y)
+    ));
+  }
+
+  function skipMatch(slot) {
+    slot = slot || 'A';
     if (S.mode === 'tournament') {
+      if (S.dualCourt) return; // tournament is paused for dual-court anyway
       if (S.tournamentQueue.length === 0) return; // nothing else to swap to
       S.tournamentQueue.push([S.courtIdx, S.challengerIdx]);
       const next = S.tournamentQueue.shift();
       S.courtIdx = next[0]; S.challengerIdx = next[1];
       save(); render(); return;
     }
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    if (S[courtField] == null || S[challField] == null) return;
     const played = new Set(S.cyclePlayedPairs);
-    const curKey = tpKey(S.courtIdx, S.challengerIdx);
-    const pool = [...S.waitQueue, S.courtIdx, S.challengerIdx];
-    // Find another unplayed pair (not the current one)
+    const curKey = tpKey(S[courtField], S[challField]);
+    // Bench pool only — the other court's occupants are mid-match elsewhere and off-limits.
+    const pool = [...S.waitQueue, S[courtField], S[challField]];
     for (let i = 0; i < pool.length; i++) {
       for (let j = i + 1; j < pool.length; j++) {
         const k = tpKey(pool[i], pool[j]);
-        if (k !== curKey && !played.has(k)) {
-          S.courtIdx = pool[i];
-          S.challengerIdx = pool[j];
-          S.waitQueue = pool.filter(x => x !== S.courtIdx && x !== S.challengerIdx);
+        if (k !== curKey && !played.has(k) && isPairAllowed(pool[i], pool[j])) {
+          S[courtField] = pool[i];
+          S[challField] = pool[j];
+          S.waitQueue = pool.filter(x => x !== S[courtField] && x !== S[challField]);
           save(); render(); return;
         }
       }
     }
-    // No other pair available — cannot skip
+    // No other pair available on the bench — cannot skip
   }
 
   function endSession() { S.screen = 'final'; save(); render(); }
@@ -1176,7 +1195,10 @@
       <div style="font-weight:700;font-size:${S.dualCourt ? 1.6 : 1.9}vh;margin-bottom:0.5vh">⚡ Challenger ชนะ</div>
       <div style="font-size:${S.dualCourt ? 1.3 : 1.5}vh;color:#fca5a5">${challengerTeam.map(pname).join(' & ')}</div>
     </button>
-  </div>`;
+  </div>
+  ${S.dualCourt && canSkipSlot(slot) ? `<div style="flex-shrink:0;text-align:center">
+    <button class="skip-slot-btn btn" data-slot="${slot}" style="background:none;color:#475569;font-size:1.3vh;padding:0.4vh 1.5vh;border:1px solid #334155;border-radius:10px">⏭ ข้ามคอร์ดนี้ (สลับกับม้านั่ง)</button>
+  </div>` : ''}`;
   }
 
   function renderPlaying() {
@@ -1200,17 +1222,10 @@
     const activeMatches = (S.courtIdx != null ? 1 : 0) + (S.dualCourt && S.courtIdxB != null ? 1 : 0);
     const pairsLeft = cycleTotal != null ? (cycleTotal - playedThisCycle - activeMatches) : null;
 
-    // Can skip if another unplayed pair exists besides current (single-court only)
+    // Bottom skip button only for single-court — dual-court gets a skip button per match card.
     let canSkip = false;
     if (!S.dualCourt) {
-      if (isTournament) {
-        canSkip = S.tournamentQueue.length > 0;
-      } else {
-        const _played = new Set(S.cyclePlayedPairs);
-        const _curKey = tpKey(S.courtIdx, S.challengerIdx);
-        const _pool = [...(waitQueue||[]), S.courtIdx, S.challengerIdx];
-        canSkip = _pool.some((x,i) => _pool.some((y,j) => j>i && tpKey(x,y)!==_curKey && !_played.has(tpKey(x,y))));
-      }
+      canSkip = isTournament ? S.tournamentQueue.length > 0 : canSkipSlot('A');
     }
 
     return `
@@ -1416,7 +1431,8 @@
     // Playing
     qa('.win-btn').forEach(b => b.addEventListener('click', () => recordWinner(b.dataset.w, b.dataset.slot)));
     q('undoBtn')?.addEventListener('click', undoLastMatch);
-    q('skipMatchBtn')?.addEventListener('click', skipMatch);
+    q('skipMatchBtn')?.addEventListener('click', () => skipMatch('A'));
+    qa('.skip-slot-btn').forEach(b => b.addEventListener('click', () => skipMatch(b.dataset.slot)));
     q('themeToggleBtn')?.addEventListener('click', () => { theme = theme==='dark'?'light':'dark'; localStorage.setItem('bmt_theme', theme); render(); });
     q('addPlayerBtn')?.addEventListener('click', () => { showAddPlayer = true; render(); });
     q('endBtn')?.addEventListener('click', endSession);

@@ -256,6 +256,49 @@ console.log('\n[limited mode] dual-court, 9 players, cap 3 (impossible total), 3
   console.log(`  info matches=${matches} cycles=${cycles} counts=${JSON.stringify(counts)}`);
 }
 
+// ── Test 5c: dual-court skip — bench team swaps in, no team is lost, no duplicate match ──
+console.log('\n[full mode] dual-court skip: bench swaps in for a not-ready court');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({length: 10}, (_, i) => ({ id: i+1, name: `P${i+1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'full';
+  S.dualCourt = true;
+  ctx.startSession(); // 5 teams -> A active, B active, 1 team on the bench
+
+  const benchCountBefore = S.waitQueue.length;
+  check('exactly one team is benched with 5 teams on 2 courts', benchCountBefore === 1);
+
+  const canSkipA = ctx.canSkipSlot('A');
+  check('court A reports skippable (bench team available)', canSkipA);
+
+  const beforeA = [S.courtIdx, S.challengerIdx];
+  const benchTeamBefore = S.waitQueue[0];
+  ctx.skipMatch('A');
+  const afterA = [S.courtIdx, S.challengerIdx];
+  check('skip actually changed court A\'s pair', afterA[0] !== beforeA[0] || afterA[1] !== beforeA[1]);
+  check('the previously-benched team is now playing on court A', afterA.includes(benchTeamBefore));
+  check('one of the old court-A teams went to the bench (nobody lost)', S.waitQueue.includes(beforeA[0]) || S.waitQueue.includes(beforeA[1]));
+  check('court B untouched by the skip', S.courtIdxB != null && S.challengerIdxB != null);
+
+  // Play the whole session out and verify total match integrity still holds.
+  let matches = 0, cycles = 0, guard = 0;
+  while (cycles < 2 && guard++ < 3000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); cycles++; continue; }
+    if (S.screen !== 'playing') break;
+    const aReady = S.courtIdx != null && S.challengerIdx != null;
+    const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+    if (!aReady && !bReady) break;
+    if (aReady && (Math.random() < 0.5 || !bReady)) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+    matches++;
+  }
+  const N = S.teams.length;
+  const expectedPerCycle = N * (N - 1) / 2;
+  check(`match integrity holds after skip: exactly ${expectedPerCycle} per cycle`, matches === expectedPerCycle * cycles);
+}
+
 // ── Test 6: mid-game remove during tournament + dual court (no crash) ──
 console.log('\n[mid-game] remove player during tournament dual-court round');
 {
