@@ -217,6 +217,74 @@
     return 'blocked'; // unplayed pairs remain but only involve teams active on the other court
   }
 
+  // Whether team a vs team b is a legal pairing right now (limited mode: both must be under cap).
+  function isPairAllowed(a, b) {
+    if (S.mode === 'limited') {
+      const threshold = S.matchesPerCycle || 3;
+      const tmc = S.teamMatchCounts || {};
+      return (tmc[a] || 0) < threshold && (tmc[b] || 0) < threshold;
+    }
+    return true;
+  }
+
+  // Ensure one court slot has an active match, pulling from the shared waitQueue.
+  // If the queue alone can't supply a challenger (setupNextMatchForSlot returns 'blocked'),
+  // try pairing directly against the OTHER court's current occupant — this is the only
+  // fix for the case where the single remaining valid pair is split across both courts
+  // (each court's own search excludes the team parked on the other court).
+  function seedSlot(slot) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    const otherCourtField = slot === 'A' ? 'courtIdxB' : 'courtIdx';
+    const otherChallField = slot === 'A' ? 'challengerIdxB' : 'challengerIdx';
+
+    if (S[courtField] == null) {
+      if (S.waitQueue.length === 0) return 'empty';
+      S[courtField] = S.waitQueue.shift();
+    }
+
+    const result = setupNextMatchForSlot(slot);
+    if (result === 'ok') return 'ok';
+    if (result === 'done') { S[courtField] = null; S[challField] = null; return 'done'; }
+
+    // 'blocked': try the other court's occupant directly — but ONLY if that court is itself
+    // idle (no active challenger). If the other court is mid-match, its team is off-limits.
+    if (S.dualCourt && S[otherCourtField] != null && S[otherChallField] == null) {
+      const a = S[courtField], b = S[otherCourtField];
+      const played = new Set(S.cyclePlayedPairs);
+      if (!played.has(tpKey(a, b)) && isPairAllowed(a, b)) {
+        S[challField] = b;
+        S[otherCourtField] = null;
+        return 'ok';
+      }
+    }
+    if (!S.dualCourt) {
+      // No second court ever exists to complete this pairing — effectively done.
+      S[courtField] = null;
+      S[challField] = null;
+      return 'done';
+    }
+    // Genuinely blocked for now (not globally done) — keep the occupant parked so it isn't
+    // lost. Once the other court finishes its current match, seeding will retry this slot
+    // and may find a fresh cross-pair opportunity then.
+    return 'blocked';
+  }
+
+  // Try to keep both court slots occupied with a valid match (A first, then B —
+  // seeding B after A lets B's cross-pair check see A's freshly-set occupant if needed).
+  function seedBothCourts() {
+    if (S.challengerIdx == null) seedSlot('A');
+    if (S.dualCourt && S.challengerIdxB == null) seedSlot('B');
+  }
+
+  // Cycle is over once every active court is idle — either truly done (court null) or
+  // mutually blocked with no possible cross-pair (court parked, challenger null). Checking
+  // challenger-null on every slot covers both cases without conflating "waiting for the
+  // other court" (only one slot idle) with genuine completion (all idle at once).
+  function cycleIsComplete() {
+    return S.challengerIdx == null && (!S.dualCourt || S.challengerIdxB == null);
+  }
+
   // Shuffle array in place (Fisher-Yates)
   function shuffle(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
@@ -438,23 +506,13 @@
         else { S.tournamentLevel++; initTournamentRound(); }
       }
     } else {
-      if (slotANeedsRefill) {
-        if (S.courtIdx === null && S.waitQueue.length > 0) S.courtIdx = S.waitQueue.shift();
-        if (S.courtIdx != null) {
-          const r = setupNextMatchForSlot('A');
-          if (r !== 'ok') S.challengerIdx = null;
-        }
+      if (slotANeedsRefill) S.challengerIdx = null;
+      if (slotBNeedsRefill) S.challengerIdxB = null;
+      seedBothCourts();
+      if (cycleIsComplete()) {
+        S.screen = 'newcycle';
+        S.cycleCount++;
       }
-      if (slotBNeedsRefill) {
-        if (S.courtIdxB === null && S.waitQueue.length > 0) S.courtIdxB = S.waitQueue.shift();
-        if (S.courtIdxB != null) {
-          const r = setupNextMatchForSlot('B');
-          if (r !== 'ok') S.challengerIdxB = null;
-        }
-      }
-      const aFinished = S.courtIdx === null;
-      const bFinished = !S.dualCourt || S.courtIdxB === null;
-      if (aFinished && bFinished) { S.screen = 'newcycle'; S.cycleCount++; }
     }
 
     if (S.lastSoloId === id) S.lastSoloId = null;
@@ -499,10 +557,7 @@
     });
 
     // Dual-court: seed court B with a second match from the same pool
-    if (S.dualCourt && S.waitQueue.length > 0) {
-      S.courtIdxB = S.waitQueue.shift();
-      setupNextMatchForSlot('B');
-    }
+    if (S.dualCourt) seedSlot('B');
   }
 
   function initTournamentRound() {
@@ -713,15 +768,11 @@
     } else {
       S[courtField] = winnerIdx;
     }
+    S[challField] = null;
 
-    const result = setupNextMatchForSlot(slot);
-    if (result !== 'ok') S[challField] = null;
+    seedBothCourts();
 
-    const otherChallField = slot === 'A' ? 'challengerIdxB' : 'challengerIdx';
-    const otherCourtActive = S.dualCourt && S[otherChallField] != null;
-
-    if ((result === 'done' || result === 'blocked') && !otherCourtActive) {
-      // 'blocked' with no active other court shouldn't happen structurally, but resolve as done to avoid a soft-lock
+    if (cycleIsComplete()) {
       S.screen = 'newcycle';
       S.cycleCount++;
     }
@@ -964,6 +1015,7 @@
 
   // ── Setup Screen ───────────────────────────────────────────────────
   function renderSetup() {
+    if (S.mode === 'tournament') S.mode = 'full'; // tournament mode paused — fall back
     const { players, presentIds } = S;
     const ok = presentIds.length >= 4;
     const rows = Math.max(1, Math.ceil(players.length / 3));
@@ -1025,9 +1077,9 @@
       </button>
     </div>
     <div style="display:flex;align-items:stretch;gap:0.8vh;margin-top:0.8vh">
-      <button id="modeTournamentBtn" class="btn" style="flex:1;padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
-        background:${S.mode === 'tournament' ? '#d97706' : '#334155'};color:${S.mode === 'tournament' ? '#fff' : '#94a3b8'}">
-        🏆 Tournament
+      <button id="modeTournamentBtn" class="btn" disabled title="พักใช้งานชั่วคราว" style="flex:1;padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;cursor:not-allowed;
+        background:#1e293b;color:#475569">
+        🏆 Tournament (พักไว้)
       </button>
       <button id="dualCourtBtn" class="btn" title="เล่น 2 คอร์ดพร้อมกัน" style="flex:0 0 auto;padding:1.2vh;border-radius:12px;font-size:2vh;font-weight:700;
         background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">

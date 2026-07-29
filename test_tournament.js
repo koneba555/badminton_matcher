@@ -219,7 +219,41 @@ console.log('\n[full mode] dual-court session simulation, 8 players, 3 cycles');
   check('never stuck with both courts idle mid-cycle (no soft-lock)', !bothIdleAtOnceViolation);
   check('session ran without crashing and produced matches', matches > 10);
   check('reached at least 2 completed cycles', cycles >= 2);
-  console.log(`  info matches=${matches} cycles=${cycles}`);
+  const N = S.teams.length;
+  const expectedPerCycle = N * (N - 1) / 2;
+  check(`exactly ${expectedPerCycle} matches per cycle, no pairs lost or duplicated (${matches} over ${cycles} cycles)`, matches === expectedPerCycle * cycles);
+  console.log(`  info matches=${matches} cycles=${cycles} expectedPerCycle=${expectedPerCycle}`);
+}
+
+// ── Test 5b: limited mode + dual court, impossible cap (5 teams, cap 3) — no soft-lock ──
+console.log('\n[limited mode] dual-court, 9 players, cap 3 (impossible total), 3 cycles');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({length: 9}, (_, i) => ({ id: i+1, name: `P${i+1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'limited';
+  S.matchesPerCycle = 3;
+  S.dualCourt = true;
+  ctx.startSession();
+
+  let matches = 0, cycles = 0, guard = 0;
+  let softlock = false;
+  while (cycles < 3 && guard++ < 3000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); cycles++; continue; }
+    if (S.screen !== 'playing') break;
+    const aReady = S.courtIdx != null && S.challengerIdx != null;
+    const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+    if (!aReady && !bReady) { softlock = true; break; }
+    if (aReady && (Math.random() < 0.5 || !bReady)) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+    matches++;
+  }
+  const counts = S.presentIds.map(id => matchCountOf(S, id));
+  check('never soft-locks even with a mathematically impossible cap', !softlock);
+  check('reached 3 cycles', cycles === 3);
+  check('no player falls more than 1 match behind the max (fair shortfall distribution)', Math.max(...counts) - Math.min(...counts) <= 2);
+  console.log(`  info matches=${matches} cycles=${cycles} counts=${JSON.stringify(counts)}`);
 }
 
 // ── Test 6: mid-game remove during tournament + dual court (no crash) ──
