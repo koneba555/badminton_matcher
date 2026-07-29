@@ -998,13 +998,15 @@
         background:${S.mode === 'limited' ? '#7c3aed' : '#334155'};color:${S.mode === 'limited' ? '#fff' : '#94a3b8'}">
         🎯 กำหนดแมต
       </button>
-      <button id="modeTournamentBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
+    </div>
+    <div style="display:flex;align-items:stretch;gap:0.8vh;margin-top:0.8vh">
+      <button id="modeTournamentBtn" class="btn" style="flex:1;padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
         background:${S.mode === 'tournament' ? '#d97706' : '#334155'};color:${S.mode === 'tournament' ? '#fff' : '#94a3b8'}">
         🏆 Tournament
       </button>
-      <button id="dualCourtBtn" class="btn" title="เล่น 2 คอร์ดพร้อมกัน" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:2vh;font-weight:700;
+      <button id="dualCourtBtn" class="btn" title="เล่น 2 คอร์ดพร้อมกัน" style="flex:0 0 auto;padding:1.2vh;border-radius:12px;font-size:2vh;font-weight:700;
         background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">
-        🏟️🏟️${S.dualCourt ? ' ✓' : ''}
+        🟩🟩${S.dualCourt ? ' ✓' : ''}
       </button>
     </div>
     ${S.mode === 'limited' ? (() => {
