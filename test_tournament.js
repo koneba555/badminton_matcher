@@ -258,5 +258,35 @@ console.log('\n[mid-game] remove player during tournament dual-court round');
   check('removed player no longer in presentIds', !S.presentIds.includes(1) || true); // victim id varies; just ensure no crash path above
 }
 
+// ── Test 7: bye fairness — match counts should stay tight across many brackets ──
+console.log('\n[tournament] bye fairness, 9 players, dual court, 8 brackets');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({length: 9}, (_, i) => ({ id: i+1, name: `P${i+1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'tournament';
+  S.dualCourt = true;
+  ctx.startSession();
+
+  let guard = 0;
+  while (S.cycleCount < 8 && guard++ < 5000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); continue; }
+    if (S.screen !== 'playing') break;
+    const aReady = S.courtIdx != null && S.challengerIdx != null;
+    const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+    if (!aReady && !bReady) break;
+    if (aReady && (Math.random() < 0.5 || !bReady)) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+  }
+  const counts = S.presentIds.map(id => matchCountOf(S, id));
+  const spread = Math.max(...counts) - Math.min(...counts);
+  console.log(`  info matchCounts=${JSON.stringify(counts)} spread=${spread}`);
+  check('match-count spread across players stays small (<=2)', spread <= 2);
+}
+function matchCountOf(S, id) {
+  return (S.rounds || []).filter(r => (r.courtTeam||[]).includes(id) || (r.challengerTeam||[]).includes(id)).length;
+}
+
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -58,6 +58,7 @@
       tournamentLastResult: {},  // {teamIdx: 'win'|'loss'|'bye'} from the level in progress — feeds next level's pairing
       tournamentPlayedPairs: [], // "i,j" team-idx pairs ever played — minimizes rematches across levels
       tournamentLevel: 1,        // current bracket level (1 = first random pairing); a "รอบ" spans ceil(log2(teams)) levels
+      tournamentTeamMatches: {}, // {teamIdx: totalMatchesPlayed} persists whole session — used to pick byes fairly
     };
   }
 
@@ -270,8 +271,9 @@
   // lastResult = {teamIdx: 'win'|'loss'|'bye'} from the previous round (empty on round 1 = everyone in one pool).
   // Odd-sized bucket gets one leftover cross-paired against the other bucket's leftover, or a bye if both odd/only one bucket.
   // Best-effort avoids immediate rematches using playedPairs history (tries a few shuffles, keeps the one with fewest repeats).
-  function buildTournamentRound(teamCount, lastResult, playedPairs) {
+  function buildTournamentRound(teamCount, lastResult, playedPairs, teamMatches) {
     const played = new Set(playedPairs || []);
+    const matches = teamMatches || {};
     function attempt() {
       const idxs = Array.from({ length: teamCount }, (_, i) => i);
       let winners, losers;
@@ -283,9 +285,21 @@
         losers = shuffle(idxs.filter(i => lastResult[i] === 'loss'));
       }
       function pairUp(group) {
+        if (group.length % 2 === 0) {
+          const pairs = [];
+          for (let i = 0; i + 1 < group.length; i += 2) pairs.push([group[i], group[i + 1]]);
+          return { pairs, leftover: null };
+        }
+        // Odd group: the leftover (bye/cross-pair candidate) is whoever has played
+        // the MOST matches so far, so teams that are behind never get left out again.
+        let pick = 0;
+        for (let i = 1; i < group.length; i++) {
+          if ((matches[group[i]] || 0) > (matches[group[pick]] || 0)) pick = i;
+        }
+        const leftover = group[pick];
+        const rest = group.filter((_, i) => i !== pick);
         const pairs = [];
-        for (let i = 0; i + 1 < group.length; i += 2) pairs.push([group[i], group[i + 1]]);
-        const leftover = group.length % 2 === 1 ? group[group.length - 1] : null;
+        for (let i = 0; i + 1 < rest.length; i += 2) pairs.push([rest[i], rest[i + 1]]);
         return { pairs, leftover };
       }
       const w = pairUp(winners), l = pairUp(losers);
@@ -374,6 +388,12 @@
         if(!gone(idx)) newLr[remap(idx)]=v;
       });
       S.tournamentLastResult = newLr;
+      const newTteamm = {};
+      Object.entries(S.tournamentTeamMatches||{}).forEach(([k,v]) => {
+        const idx=parseInt(k);
+        if(!gone(idx)) newTteamm[remap(idx)]=v;
+      });
+      S.tournamentTeamMatches = newTteamm;
     }
 
     // Which court slots lost their occupant?
@@ -487,7 +507,7 @@
 
   function initTournamentRound() {
     S.teams = S.tournamentTeams;
-    const { queue, byes } = buildTournamentRound(S.teams.length, S.tournamentLastResult || {}, S.tournamentPlayedPairs || []);
+    const { queue, byes } = buildTournamentRound(S.teams.length, S.tournamentLastResult || {}, S.tournamentPlayedPairs || [], S.tournamentTeamMatches || {});
     S.tournamentQueue = queue;
     S.tournamentLastResult = {};
     byes.forEach(idx => { S.tournamentLastResult[idx] = 'bye'; });
@@ -524,6 +544,7 @@
     if (S.mode === 'tournament') {
       S.tournamentTeams = buildFixedTeams(S.presentIds);
       S.tournamentPlayedPairs = [];
+      S.tournamentTeamMatches = {};
       Object.assign(S, {
         screen: 'playing',
         rounds: [],
@@ -623,6 +644,10 @@
     S.tournamentLastResult[winIdx] = 'win';
     S.tournamentLastResult[loseIdx] = 'loss';
     S.tournamentPlayedPairs = [...(S.tournamentPlayedPairs || []), tpKey(courtI, challI)];
+    const tteamm = S.tournamentTeamMatches || {};
+    tteamm[courtI] = (tteamm[courtI] || 0) + 1;
+    tteamm[challI] = (tteamm[challI] || 0) + 1;
+    S.tournamentTeamMatches = tteamm;
 
     const next = S.tournamentQueue.shift();
     if (next) {
