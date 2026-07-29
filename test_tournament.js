@@ -108,6 +108,28 @@ console.log('\n[buildTournamentRound] odd team count handling');
   }
 }
 
+// ── Test 2b: 4-team bracket — exactly 2 levels (4 matches) then round ends ──
+console.log('\n[tournament] 4-team bracket: random pairing, then winner-meets-winner/loser-meets-loser, then round ends');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = [1,2,3,4,5,6,7,8].map(i => ({ id: i, name: `P${i}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'tournament';
+  S.dualCourt = false;
+  ctx.startSession(); // 8 players -> 4 fixed teams, maxLevels = ceil(log2(4)) = 2
+
+  check('maxTournamentLevels(4) === 2', ctx.maxTournamentLevels(4) === 2);
+
+  let matches = 0, guard = 0;
+  while (S.screen === 'playing' && guard++ < 50) {
+    ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger');
+    matches++;
+  }
+  check('round ends after exactly 4 matches (2 levels x 2 matches)', matches === 4);
+  check('screen transitioned to newcycle after level 2', S.screen === 'newcycle');
+}
+
 // ── Test 3: full tournament session simulation (single court) ──
 console.log('\n[tournament] full single-court session simulation, 7 players, 10 rounds');
 {
@@ -120,7 +142,8 @@ console.log('\n[tournament] full single-court session simulation, 7 players, 10 
   ctx.startSession();
 
   let matches = 0, guard = 0;
-  while (S.cycleCount < 10 && guard++ < 2000) {
+  while (S.cycleCount < 6 && guard++ < 2000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); continue; }
     if (S.screen !== 'playing') break;
     if (S.courtIdx == null) break; // shouldn't happen single-court
     ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger');
@@ -128,7 +151,7 @@ console.log('\n[tournament] full single-court session simulation, 7 players, 10 
   }
   const rounds = S.cycleCount;
   check('session ran without crashing and produced matches', matches > 10);
-  check('reached at least 5 completed rounds', rounds >= 5);
+  check('reached at least 5 completed brackets', rounds >= 5);
   check('all present players have a score entry', S.presentIds.every(id => typeof S.scores[id] === 'number'));
   console.log(`  info matches=${matches} rounds=${rounds}`);
 }
@@ -146,11 +169,12 @@ console.log('\n[tournament] dual-court session simulation, 9 players, 8 rounds')
 
   let matches = 0, guard = 0;
   let bothIdleAtOnceViolation = false;
-  while (S.cycleCount < 8 && guard++ < 3000) {
+  while (S.cycleCount < 5 && guard++ < 3000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); continue; }
     if (S.screen !== 'playing') break;
     const aReady = S.courtIdx != null && S.challengerIdx != null;
     const bReady = S.courtIdxB != null && S.challengerIdxB != null;
-    if (!aReady && !bReady) { bothIdleAtOnceViolation = true; break; } // should have auto-advanced to next round
+    if (!aReady && !bReady) { bothIdleAtOnceViolation = true; break; } // should have advanced to next level or newcycle
     if (aReady && (Math.random() < 0.5 || !bReady)) {
       ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
     } else if (bReady) {
@@ -159,9 +183,9 @@ console.log('\n[tournament] dual-court session simulation, 9 players, 8 rounds')
     matches++;
   }
   const rounds = S.cycleCount;
-  check('never stuck with both courts idle mid-round (no soft-lock)', !bothIdleAtOnceViolation);
+  check('never stuck with both courts idle mid-level (no soft-lock)', !bothIdleAtOnceViolation);
   check('session ran without crashing and produced matches', matches > 10);
-  check('reached at least 4 completed rounds', rounds >= 4);
+  check('reached at least 3 completed brackets', rounds >= 3);
   console.log(`  info matches=${matches} rounds=${rounds}`);
 }
 

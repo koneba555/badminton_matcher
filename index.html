@@ -55,8 +55,9 @@
       challengerIdxB: null,      // court B challenger index (null = idle, waiting for other court)
       tournamentTeams: [],       // fixed team pairs for tournament mode — set once, persists whole session
       tournamentQueue: [],       // remaining [teamIdxA, teamIdxB] pairs for the current tournament round
-      tournamentLastResult: {},  // {teamIdx: 'win'|'loss'|'bye'} from the round in progress — feeds next round pairing
-      tournamentPlayedPairs: [], // "i,j" team-idx pairs ever played — minimizes rematches across rounds
+      tournamentLastResult: {},  // {teamIdx: 'win'|'loss'|'bye'} from the level in progress — feeds next level's pairing
+      tournamentPlayedPairs: [], // "i,j" team-idx pairs ever played — minimizes rematches across levels
+      tournamentLevel: 1,        // current bracket level (1 = first random pairing); a "รอบ" spans ceil(log2(teams)) levels
     };
   }
 
@@ -406,7 +407,11 @@
       }
       const aDone = S.courtIdx === null;
       const bDone = !S.dualCourt || S.courtIdxB === null;
-      if (aDone && bDone) { S.cycleCount++; initTournamentRound(); }
+      if (aDone && bDone) {
+        const maxLevels = maxTournamentLevels(S.teams.length);
+        if (S.tournamentLevel >= maxLevels) { S.screen = 'newcycle'; S.cycleCount++; }
+        else { S.tournamentLevel++; initTournamentRound(); }
+      }
     } else {
       if (slotANeedsRefill) {
         if (S.courtIdx === null && S.waitQueue.length > 0) S.courtIdx = S.waitQueue.shift();
@@ -494,6 +499,19 @@
     }
   }
 
+  // A bracket "รอบ" runs winner-meets-winner / loser-meets-loser for ceil(log2(teamCount)) levels,
+  // then ends (e.g. 4 teams: level1 random pairs, level2 winners-vs-winners & losers-vs-losers, done).
+  function maxTournamentLevels(teamCount) {
+    return Math.max(1, Math.ceil(Math.log2(Math.max(2, teamCount))));
+  }
+
+  // Reseed a brand-new bracket from scratch (level 1, random pairing, no carried-over results).
+  function startTournamentBracket() {
+    S.tournamentLevel = 1;
+    S.tournamentLastResult = {};
+    initTournamentRound();
+  }
+
   function startSession() {
     if (S.presentIds.length < 4) return;
     undoStack = [];
@@ -501,7 +519,6 @@
     if (S.mode === 'tournament') {
       S.tournamentTeams = buildFixedTeams(S.presentIds);
       S.tournamentPlayedPairs = [];
-      S.tournamentLastResult = {};
       Object.assign(S, {
         screen: 'playing',
         rounds: [],
@@ -512,7 +529,7 @@
         scheduleIdx: -1,
         playerConsecutive: {},
       });
-      initTournamentRound();
+      startTournamentBracket();
       save(); render();
       return;
     }
@@ -614,11 +631,16 @@
     const aDone = S.courtIdx === null;
     const bDone = !S.dualCourt || S.courtIdxB === null;
     if (aDone && bDone) {
-      // Continuous swiss tournament: auto-advance to the next round instead of
-      // stopping at a "รอบจบ" screen — winners keep meeting winners, losers keep
-      // meeting losers, without interrupting play every couple of matches.
-      S.cycleCount++;
-      initTournamentRound();
+      const maxLevels = maxTournamentLevels(S.teams.length);
+      if (S.tournamentLevel >= maxLevels) {
+        // Bracket exhausted its levels (e.g. 4 teams: random pairing, then winners-vs-winners
+        // and losers-vs-losers) → round complete, show summary before reseeding a new bracket.
+        S.screen = 'newcycle';
+        S.cycleCount++;
+      } else {
+        S.tournamentLevel++;
+        initTournamentRound();
+      }
     }
   }
 
@@ -679,7 +701,7 @@
     undoStack.push(JSON.parse(JSON.stringify(S)));
     if (S.mode === 'tournament') {
       S.screen = 'playing';
-      initTournamentRound();
+      startTournamentBracket();
       save(); render();
       return;
     }
@@ -1113,7 +1135,7 @@
   <div style="flex-shrink:0;display:flex;justify-content:space-between;align-items:center">
     <div>
       <span style="font-size:2.5vh;font-weight:800">แมตช์ที่ ${matchNum}</span>
-      <span style="color:#64748b;font-size:1.6vh;margin-left:1vh">รอบ ${cycleCount}</span>
+      <span style="color:#64748b;font-size:1.6vh;margin-left:1vh">รอบ ${cycleCount}${isTournament ? ` · เลเวล ${S.tournamentLevel}/${maxTournamentLevels(S.teams.length)}` : ''}</span>
     </div>
     <div style="display:flex;gap:0.8vh">
       ${undoStack.length > 0 ? `<button id="undoBtn" class="btn" style="background:#334155;color:#fbbf24;border-radius:12px;padding:0.8vh 1.2vh;font-size:1.6vh">↩</button>` : ''}
