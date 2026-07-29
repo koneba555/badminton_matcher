@@ -256,6 +256,37 @@ console.log('\n[limited mode] dual-court, 9 players, cap 3 (impossible total), 3
   console.log(`  info matches=${matches} cycles=${cycles} counts=${JSON.stringify(counts)}`);
 }
 
+// ── Test 5b-2: same impossible-cap case over a multiple-of-9 run — deficit rotation should
+// fully cancel out, giving every player an IDENTICAL match count (this is what the precomputed
+// per-cycle schedule guarantees; the old live/greedy engine could not achieve this) ──
+console.log('\n[limited mode] dual-court, 9 players, cap 3, 9 cycles — exact fairness');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({length: 9}, (_, i) => ({ id: i+1, name: `P${i+1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'limited';
+  S.matchesPerCycle = 3;
+  S.dualCourt = true;
+  ctx.startSession();
+
+  let guard = 0, cycles = 0;
+  while (cycles < 9 && guard++ < 9000) {
+    if (S.screen === 'newcycle') { ctx.startNewCycle(); cycles++; continue; }
+    if (S.screen !== 'playing') break;
+    const aReady = S.courtIdx != null && S.challengerIdx != null;
+    const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+    if (!aReady && !bReady) break;
+    if (aReady && (Math.random() < 0.5 || !bReady)) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+  }
+  const counts = S.presentIds.map(id => matchCountOf(S, id));
+  const spread = Math.max(...counts) - Math.min(...counts);
+  check('reached 9 cycles', cycles === 9);
+  check('perfectly even match count for every player (spread 0)', spread === 0);
+  console.log(`  info counts=${JSON.stringify(counts)} spread=${spread}`);
+}
+
 // ── Test 5c: dual-court skip — bench team swaps in, no team is lost, no duplicate match ──
 console.log('\n[full mode] dual-court skip: bench swaps in for a not-ready court');
 {

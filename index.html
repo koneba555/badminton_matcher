@@ -60,6 +60,8 @@
       tournamentLevel: 1,        // current bracket level (1 = first random pairing); a "รอบ" spans ceil(log2(teams)) levels
       tournamentTeamMatches: {}, // {teamIdx: totalMatchesPlayed} persists whole session — used to pick byes fairly
       teamMatchDeficit: {},      // {playerId: idealMatches - actualMatches, accumulated} — full/limited mode fairness across cycles
+      limitedQueue: [],          // precomputed [teamIdxA, teamIdxB] pairs for the current 'limited' mode cycle
+      limitedPlayedPairs: [],    // "i,j" team-idx pairs ever played in limited mode — minimizes rematches across cycles
     };
   }
 
@@ -156,52 +158,16 @@
     return usedPartnerSet().size >= total;
   }
 
-  // Find next challenger for one court slot ('A' or 'B'). S[courtField] must already be set.
-  // Returns 'ok' (challenger assigned), 'done' (whole round/cycle complete — no unplayed pairs left anywhere),
-  // or 'blocked' (pairs remain, but none available right now because the only candidates are active on the other court).
+  // Find next challenger for one court slot ('A' or 'B') in full mode. S[courtField] must
+  // already be set. Returns 'ok' (challenger assigned), 'done' (whole cycle complete — no
+  // unplayed pairs left anywhere), or 'blocked' (pairs remain, but none available right now
+  // because the only candidates are active on the other court).
   function setupNextMatchForSlot(slot) {
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
     const cIdx = S[courtField];
     const played = new Set(S.cyclePlayedPairs);
 
-    if (S.mode === 'limited') {
-      const threshold = S.matchesPerCycle || 3;
-      const tmc = S.teamMatchCounts || {};
-      const deficit = S.teamMatchDeficit || {};
-      const teamDeficit = i => Math.max(...S.teams[i].map(pid => deficit[pid] || 0));
-      const N = S.teams.length;
-      if (Array.from({length: N}, (_, i) => (tmc[i] || 0)).every(c => c >= threshold)) return 'done';
-      // When a valid opponent is impossible for everyone to hit the cap, prefer the team
-      // most behind on matches (highest deficit) so the shortfall rotates across cycles.
-      const candidates = S.waitQueue
-        .map((i, pos) => ({ i, pos }))
-        .filter(({ i }) => (tmc[i] || 0) < threshold && !played.has(tpKey(cIdx, i)))
-        .sort((a, b) => teamDeficit(b.i) - teamDeficit(a.i));
-      if (candidates.length) {
-        const { i: chosen, pos } = candidates[0];
-        S.waitQueue.splice(pos, 1);
-        S[challField] = chosen;
-        return 'ok';
-      }
-      const pool = [...S.waitQueue, cIdx];
-      const underCap = pool.filter(i => (tmc[i] || 0) < threshold).sort((a, b) => teamDeficit(b) - teamDeficit(a));
-      for (let i = 0; i < underCap.length; i++) {
-        for (let j = i + 1; j < underCap.length; j++) {
-          if (!played.has(tpKey(underCap[i], underCap[j]))) {
-            const newCourt = underCap[i], newChallenger = underCap[j];
-            S.waitQueue = pool.filter(x => x !== newCourt && x !== newChallenger);
-            S[courtField] = newCourt;
-            S[challField] = newChallenger;
-            return 'ok';
-          }
-        }
-      }
-      const stillPending = Array.from({length: N}, (_, i) => i).some(i => (tmc[i] || 0) < threshold);
-      return stillPending ? 'blocked' : 'done';
-    }
-
-    // Full mode: play all C(N,2) team pairs
     const N = S.teams.length;
     const total = N * (N - 1) / 2;
     if (played.size >= total) return 'done';
@@ -226,16 +192,6 @@
       }
     }
     return 'blocked'; // unplayed pairs remain but only involve teams active on the other court
-  }
-
-  // Whether team a vs team b is a legal pairing right now (limited mode: both must be under cap).
-  function isPairAllowed(a, b) {
-    if (S.mode === 'limited') {
-      const threshold = S.matchesPerCycle || 3;
-      const tmc = S.teamMatchCounts || {};
-      return (tmc[a] || 0) < threshold && (tmc[b] || 0) < threshold;
-    }
-    return true;
   }
 
   // Ensure one court slot has an active match, pulling from the shared waitQueue.
@@ -263,7 +219,7 @@
     if (S.dualCourt && S[otherCourtField] != null && S[otherChallField] == null) {
       const a = S[courtField], b = S[otherCourtField];
       const played = new Set(S.cyclePlayedPairs);
-      if (!played.has(tpKey(a, b)) && isPairAllowed(a, b)) {
+      if (!played.has(tpKey(a, b))) {
         S[challField] = b;
         S[otherCourtField] = null;
         return 'ok';
@@ -414,6 +370,80 @@
     return { queue: best.queue, byes: best.byes };
   }
 
+  // Precompute the whole cycle's match list for 'limited' mode instead of deciding matches
+  // live (king-of-court), so the cap constraint can be satisfied exactly by construction.
+  // Every team gets `cap` matches, except — when teamCount*cap is odd, meaning it's
+  // mathematically impossible for everyone to hit the cap (handshake parity) — exactly one
+  // team gets cap-1. That team is chosen as whoever currently has the LOWEST accumulated
+  // deficit (owes the least catch-up), so the unavoidable shortfall rotates across cycles
+  // instead of always landing on the same team.
+  function buildLimitedSchedule(teamCount, threshold, teams, deficit, priorPlayedPairs) {
+    const cap = Math.min(threshold, teamCount - 1);
+    const teamDeficit = i => Math.max(...teams[i].map(pid => deficit[pid] || 0));
+    const target = Array.from({ length: teamCount }, () => cap);
+    if ((teamCount * cap) % 2 === 1) {
+      const order = Array.from({ length: teamCount }, (_, i) => i)
+        .sort((a, b) => teamDeficit(a) - teamDeficit(b));
+      target[order[0]] -= 1;
+    }
+    const remaining = target.slice();
+    const played = new Set(priorPlayedPairs || []);
+    const usedThisCycle = new Set();
+    const schedule = [];
+    let guard = 0;
+    while (guard++ < 3000) {
+      const order = Array.from({ length: teamCount }, (_, i) => i).filter(i => remaining[i] > 0);
+      if (order.length < 2) break;
+      order.sort((a, b) => remaining[b] - remaining[a]);
+      const i = order[0];
+      let partner = -1, bestScore = -Infinity;
+      for (const j of order.slice(1)) {
+        const key = tpKey(i, j);
+        if (usedThisCycle.has(key)) continue;
+        const score = remaining[j] * 10 - (played.has(key) ? 5 : 0);
+        if (score > bestScore) { bestScore = score; partner = j; }
+      }
+      if (partner === -1) { remaining[i] = 0; continue; } // no valid partner left for i this cycle
+      schedule.push([i, partner]);
+      usedThisCycle.add(tpKey(i, partner));
+      remaining[i]--; remaining[partner]--;
+    }
+    return shuffle(schedule);
+  }
+
+  // Pop the first queued pair that doesn't involve any team in `exclude` (teams actively
+  // playing on the other court right now). Skipping ahead like this — rather than only
+  // looking at the front of the queue — is what lets dual-court draw two independent
+  // matches from the same precomputed schedule without ever double-booking a team.
+  function popNextForLimitedSlot(exclude) {
+    for (let idx = 0; idx < S.limitedQueue.length; idx++) {
+      const [a, b] = S.limitedQueue[idx];
+      if (!exclude.includes(a) && !exclude.includes(b)) return S.limitedQueue.splice(idx, 1)[0];
+    }
+    return null;
+  }
+
+  function seedLimitedSlot(slot) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+    if (S[challField] != null) return; // already active, nothing to do
+    const otherCourtField = slot === 'A' ? 'courtIdxB' : 'courtIdx';
+    const otherChallField = slot === 'A' ? 'challengerIdxB' : 'challengerIdx';
+    const exclude = [];
+    if (S.dualCourt) {
+      if (S[otherCourtField] != null) exclude.push(S[otherCourtField]);
+      if (S[otherChallField] != null) exclude.push(S[otherChallField]);
+    }
+    const next = popNextForLimitedSlot(exclude);
+    if (next) { S[courtField] = next[0]; S[challField] = next[1]; }
+    else { S[courtField] = null; S[challField] = null; }
+  }
+
+  function seedBothLimitedSlots() {
+    seedLimitedSlot('A');
+    if (S.dualCourt) seedLimitedSlot('B');
+  }
+
   // ── Actions ────────────────────────────────────────────────────────
   function addPlayer(name) {
     name = name.trim().slice(0, 20);
@@ -490,20 +520,28 @@
       });
       S.tournamentTeamMatches = newTteamm;
     }
+    if (S.mode === 'limited') {
+      S.limitedQueue = (S.limitedQueue || [])
+        .filter(([a,b]) => !gone(a) && !gone(b))
+        .map(([a,b]) => [remap(a), remap(b)]);
+      S.limitedPlayedPairs = (S.limitedPlayedPairs || [])
+        .filter(k => { const [a,b]=k.split(',').map(Number); return !gone(a)&&!gone(b); })
+        .map(k => { const [a,b]=k.split(',').map(Number); return tpKey(remap(a),remap(b)); });
+    }
 
     // Which court slots lost their occupant?
     const slotANeedsRefill = gone(S.courtIdx) || gone(S.challengerIdx);
     const slotBNeedsRefill = S.dualCourt && (gone(S.courtIdxB) || gone(S.challengerIdxB));
 
     if (gone(S.courtIdx)) {
-      if (S.challengerIdx != null) S.waitQueue.push(S.challengerIdx);
+      if (S.challengerIdx != null && S.mode === 'full') S.waitQueue.push(S.challengerIdx);
       S.courtIdx = null; S.challengerIdx = null;
     } else if (gone(S.challengerIdx)) {
       S.challengerIdx = null;
     }
     if (S.dualCourt) {
       if (gone(S.courtIdxB)) {
-        if (S.challengerIdxB != null) S.waitQueue.push(S.challengerIdxB);
+        if (S.challengerIdxB != null && S.mode === 'full') S.waitQueue.push(S.challengerIdxB);
         S.courtIdxB = null; S.challengerIdxB = null;
       } else if (gone(S.challengerIdxB)) {
         S.challengerIdxB = null;
@@ -532,12 +570,20 @@
         if (S.tournamentLevel >= maxLevels) { S.screen = 'newcycle'; S.cycleCount++; }
         else { S.tournamentLevel++; initTournamentRound(); }
       }
+    } else if (S.mode === 'limited') {
+      if (slotANeedsRefill) S.challengerIdx = null;
+      if (slotBNeedsRefill) S.challengerIdxB = null;
+      seedBothLimitedSlots();
+      if (cycleIsComplete()) {
+        recordCycleDeficits();
+        S.screen = 'newcycle';
+        S.cycleCount++;
+      }
     } else {
       if (slotANeedsRefill) S.challengerIdx = null;
       if (slotBNeedsRefill) S.challengerIdxB = null;
       seedBothCourts();
       if (cycleIsComplete()) {
-        recordCycleDeficits();
         S.screen = 'newcycle';
         S.cycleCount++;
       }
@@ -555,18 +601,28 @@
     S.cyclePlayedPairs = [];
     S.teamMatchCounts = {};
 
-    // Reorder starting positions based on player fatigue (most-rested takes court first).
-    // This prevents the same player from playing at the end of cycle N and the start of N+1.
+    // Record partners used
+    teams.forEach(t => {
+      if (t.length === 2) {
+        const k = pairKey(t[0], t[1]);
+        if (!S.usedPartners.includes(k)) S.usedPartners.push(k);
+      }
+    });
+
+    if (S.mode === 'limited') {
+      initLimitedCycle(teams);
+      return;
+    }
+
+    // Full mode: dynamic king-of-court. Reorder starting positions by player fatigue
+    // (most-rested takes court first) — prevents the same player playing at the end of
+    // cycle N and the start of N+1.
     const pc = S.playerConsecutive || {};
-    const deficit = S.teamMatchDeficit || {};
     const fatigue = teams.map((team, i) => ({
       i,
       f: Math.max(0, ...team.map(id => pc[id] || 0)),
-      d: Math.max(...team.map(id => deficit[id] || 0)),
     }));
-    // Teams most behind on matches (from a prior impossible-cap cycle) go first, so the
-    // shortfall rotates instead of always landing on the same player; least-tired breaks ties.
-    fatigue.sort((a, b) => (b.d - a.d) || (a.f - b.f));
+    fatigue.sort((a, b) => a.f - b.f);
 
     S.courtIdx     = fatigue[0].i;
     S.challengerIdx = fatigue[1].i;
@@ -580,16 +636,25 @@
     });
     S.playerConsecutive = pc;
 
-    // Record partners used
-    teams.forEach(t => {
-      if (t.length === 2) {
-        const k = pairKey(t[0], t[1]);
-        if (!S.usedPartners.includes(k)) S.usedPartners.push(k);
-      }
-    });
-
     // Dual-court: seed court B with a second match from the same pool
     if (S.dualCourt) seedSlot('B');
+  }
+
+  // Limited mode: precompute the whole cycle's matches up front (see buildLimitedSchedule)
+  // so the cap is satisfied exactly by construction, instead of discovering shortfalls live.
+  function initLimitedCycle(teams) {
+    const threshold = S.matchesPerCycle || 3;
+    S.limitedQueue = buildLimitedSchedule(teams.length, threshold, teams, S.teamMatchDeficit || {}, S.limitedPlayedPairs || []);
+    S.courtIdx = null;
+    S.challengerIdx = null;
+    S.courtIdxB = null;
+    S.challengerIdxB = null;
+    const first = popNextForLimitedSlot([]);
+    if (first) { S.courtIdx = first[0]; S.challengerIdx = first[1]; }
+    if (S.dualCourt) {
+      const second = popNextForLimitedSlot(first ? [first[0], first[1]] : []);
+      if (second) { S.courtIdxB = second[0]; S.challengerIdxB = second[1]; }
+    }
   }
 
   function initTournamentRound() {
@@ -629,6 +694,7 @@
     undoStack = [];
     deleteMode = false;
     S.teamMatchDeficit = {};
+    S.limitedPlayedPairs = [];
     if (S.mode === 'tournament') {
       S.tournamentTeams = buildFixedTeams(S.presentIds);
       S.tournamentPlayedPairs = [];
@@ -685,6 +751,10 @@
       // New solo team sits out the current round; joins pairing from next round onward
       S.teams.push([id]);
       S.tournamentTeams.push([id]);
+    } else if (S.mode === 'limited' && (S.screen === 'playing' || S.screen === 'newcycle')) {
+      // Limited mode's cycle schedule is precomputed — new team sits out the current
+      // cycle and joins the schedule build from next cycle onward.
+      S.teams.push([id]);
     } else if (S.screen === 'playing' || S.screen === 'newcycle') {
       // Inject as new team into current cycle's wait queue
       const newTeamIdx = S.teams.length;
@@ -717,8 +787,10 @@
 
     if (S.mode === 'tournament') {
       recordWinnerTournament(slot, courtI, challI, winner);
+    } else if (S.mode === 'limited') {
+      recordWinnerLimited(slot, courtI, challI);
     } else {
-      recordWinnerStandard(slot, courtI, challI, winner);
+      recordWinnerFull(slot, courtI, challI, winner);
     }
 
     save(); render();
@@ -762,7 +834,7 @@
     }
   }
 
-  function recordWinnerStandard(slot, courtI, challI, winner) {
+  function recordWinnerFull(slot, courtI, challI, winner) {
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
 
@@ -786,24 +858,42 @@
     S.playerConsecutive = pc;
 
     const winnerFatigue = Math.max(0, ...S.teams[winnerIdx].map(pid => pc[pid] || 0));
-    const threshold = S.matchesPerCycle || 3;
-    const hitCap = S.mode === 'limited' && (tmc[winnerIdx] || 0) >= threshold;
-    const mustRest = (winnerFatigue >= 2 || hitCap) && S.waitQueue.length > 0;
+    const mustRest = winnerFatigue >= 2 && S.waitQueue.length > 0;
 
     if (mustRest) {
       S.waitQueue.push(winnerIdx);
-      if (S.mode === 'limited') {
-        const pos = S.waitQueue.findIndex(i => (tmc[i] || 0) < threshold);
-        S[courtField] = pos >= 0 ? S.waitQueue.splice(pos, 1)[0] : S.waitQueue.shift();
-      } else {
-        S[courtField] = S.waitQueue.shift();
-      }
+      S[courtField] = S.waitQueue.shift();
     } else {
       S[courtField] = winnerIdx;
     }
     S[challField] = null;
 
     seedBothCourts();
+
+    if (cycleIsComplete()) {
+      S.screen = 'newcycle';
+      S.cycleCount++;
+    }
+  }
+
+  // Limited mode's matches are precomputed (see buildLimitedSchedule) — recording a win just
+  // logs it and pulls the next queued match for this slot (skipping any pair that would
+  // double-book a team already playing on the other court).
+  function recordWinnerLimited(slot, courtI, challI) {
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
+
+    S.cyclePlayedPairs.push(tpKey(courtI, challI));
+    S.limitedPlayedPairs = [...(S.limitedPlayedPairs || []), tpKey(courtI, challI)];
+
+    const tmc = S.teamMatchCounts || {};
+    tmc[courtI] = (tmc[courtI] || 0) + 1;
+    tmc[challI] = (tmc[challI] || 0) + 1;
+    S.teamMatchCounts = tmc;
+
+    S[courtField] = null;
+    S[challField] = null;
+    seedBothLimitedSlots();
 
     if (cycleIsComplete()) {
       recordCycleDeficits();
@@ -834,18 +924,37 @@
     save(); render();
   }
 
+  // Exclude the OTHER court's current occupants (they're mid-match elsewhere, off-limits).
+  function otherSlotExclude(slot) {
+    const otherCourtField = slot === 'A' ? 'courtIdxB' : 'courtIdx';
+    const otherChallField = slot === 'A' ? 'challengerIdxB' : 'challengerIdx';
+    const exclude = [];
+    if (S.dualCourt) {
+      if (S[otherCourtField] != null) exclude.push(S[otherCourtField]);
+      if (S[otherChallField] != null) exclude.push(S[otherChallField]);
+    }
+    return exclude;
+  }
+
   // Whether a bench swap is available for this court slot: some team waiting on the bench
   // could take this match's place right now (e.g. a pair on court isn't ready to play).
   function canSkipSlot(slot) {
-    if (S.mode === 'tournament') return false;
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
     if (S[courtField] == null || S[challField] == null) return false;
+
+    if (S.mode === 'tournament') return false;
+
+    if (S.mode === 'limited') {
+      const exclude = otherSlotExclude(slot);
+      return S.limitedQueue.some(([a, b]) => !exclude.includes(a) && !exclude.includes(b));
+    }
+
     const played = new Set(S.cyclePlayedPairs);
     const curKey = tpKey(S[courtField], S[challField]);
     const pool = [...S.waitQueue, S[courtField], S[challField]];
     return pool.some((x, i) => pool.some((y, j) =>
-      j > i && tpKey(x, y) !== curKey && !played.has(tpKey(x, y)) && isPairAllowed(x, y)
+      j > i && tpKey(x, y) !== curKey && !played.has(tpKey(x, y))
     ));
   }
 
@@ -859,9 +968,21 @@
       S.courtIdx = next[0]; S.challengerIdx = next[1];
       save(); render(); return;
     }
+
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
     if (S[courtField] == null || S[challField] == null) return;
+
+    if (S.mode === 'limited') {
+      const exclude = otherSlotExclude(slot);
+      const candidate = popNextForLimitedSlot(exclude);
+      if (!candidate) return; // nothing swappable right now
+      S.limitedQueue.push([S[courtField], S[challField]]);
+      S[courtField] = candidate[0];
+      S[challField] = candidate[1];
+      save(); render(); return;
+    }
+
     const played = new Set(S.cyclePlayedPairs);
     const curKey = tpKey(S[courtField], S[challField]);
     // Bench pool only — the other court's occupants are mid-match elsewhere and off-limits.
@@ -869,7 +990,7 @@
     for (let i = 0; i < pool.length; i++) {
       for (let j = i + 1; j < pool.length; j++) {
         const k = tpKey(pool[i], pool[j]);
-        if (k !== curKey && !played.has(k) && isPairAllowed(pool[i], pool[j])) {
+        if (k !== curKey && !played.has(k)) {
           S[courtField] = pool[i];
           S[challField] = pool[j];
           S.waitQueue = pool.filter(x => x !== S[courtField] && x !== S[challField]);
@@ -1247,11 +1368,6 @@
     const playedThisCycle = (cyclePlayedPairs || []).length;
     const isLimited = S.mode === 'limited';
     const isTournament = S.mode === 'tournament';
-    const threshold = S.matchesPerCycle || 3;
-    const tmc = S.teamMatchCounts || {};
-    const teamsNotDone = isLimited
-      ? Array.from({length: N}, (_, i) => i).filter(i => (tmc[i] || 0) < threshold).length
-      : 0;
     const cycleTotal = (!isLimited && !isTournament) ? N * (N - 1) / 2 : null;
     const activeMatches = (S.courtIdx != null ? 1 : 0) + (S.dualCourt && S.courtIdxB != null ? 1 : 0);
     const pairsLeft = cycleTotal != null ? (cycleTotal - playedThisCycle - activeMatches) : null;
@@ -1295,7 +1411,7 @@
       SCOREBOARD · ${rounds.length} แมตช์ · ${isTournament
         ? `เหลืออีก ${S.tournamentQueue.length} คู่ในรอบนี้`
         : isLimited
-          ? (teamsNotDone > 0 ? `อีก ${teamsNotDone} ทีมยังไม่ครบ ${threshold} แมต` : 'ทุกทีมครบแล้ว!')
+          ? `เหลืออีก ${S.limitedQueue.length} คู่ในรอบนี้`
           : (pairsLeft > 0 ? `อีก ${pairsLeft} แมตช์จับคู่ใหม่` : 'แมตช์สุดท้ายรอบนี้')}
     </div>
     <div style="overflow-y:auto;flex:1">
