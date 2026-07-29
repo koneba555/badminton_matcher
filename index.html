@@ -127,6 +127,11 @@
 
   // ── Helpers ────────────────────────────────────────────────────────
   function pname(id) { return S.players.find(p => p.id === id)?.name ?? '?'; }
+  function matchCountFor(id) {
+    return (S.rounds || []).filter(r =>
+      (r.courtTeam || []).includes(id) || (r.challengerTeam || []).includes(id)
+    ).length;
+  }
   function pairKey(a, b) { return a < b ? `${a},${b}` : `${b},${a}`; }
   // Key for team-vs-team pair (by team index)
   function tpKey(i, j) { return i < j ? `${i},${j}` : `${j},${i}`; }
@@ -984,7 +989,7 @@
   <!-- Mode selector -->
   <div style="flex-shrink:0;${C.card}padding:1.2vh 1.5vh">
     <div style="color:#64748b;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:1vh">โหมด</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.8vh">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8vh">
       <button id="modeFullBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
         background:${S.mode === 'full' ? '#1d4ed8' : '#334155'};color:${S.mode === 'full' ? '#fff' : '#94a3b8'}">
         🔄 ครบทุกคู่
@@ -996,6 +1001,10 @@
       <button id="modeTournamentBtn" class="btn" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:1.5vh;font-weight:700;
         background:${S.mode === 'tournament' ? '#d97706' : '#334155'};color:${S.mode === 'tournament' ? '#fff' : '#94a3b8'}">
         🏆 Tournament
+      </button>
+      <button id="dualCourtBtn" class="btn" title="เล่น 2 คอร์ดพร้อมกัน" style="padding:1.2vh 0.4vh;border-radius:12px;font-size:2vh;font-weight:700;
+        background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">
+        🏟️🏟️${S.dualCourt ? ' ✓' : ''}
       </button>
     </div>
     ${S.mode === 'limited' ? (() => {
@@ -1018,10 +1027,6 @@
     ${S.mode === 'tournament' ? `
     <div style="margin-top:1vh;text-align:center;color:#94a3b8;font-size:1.3vh">คู่ที่ตั้งไว้จะคงที่ทั้งเซสชัน · ชนะเจอชนะ แพ้เจอแพ้ทุกรอบ</div>
     ` : ''}
-    <button id="dualCourtBtn" class="btn" style="margin-top:1.2vh;width:100%;padding:1vh;border-radius:12px;font-size:1.6vh;font-weight:700;
-      background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">
-      🏟️🏟️ เล่น 2 คอร์ดพร้อมกัน ${S.dualCourt ? '✓' : ''}
-    </button>
   </div>
 
   <button id="startBtn" class="btn" ${ok ? '' : 'disabled'}
@@ -1099,7 +1104,7 @@
     const { teams, rounds, cycleCount, scores, waitQueue, cyclePlayedPairs } = S;
 
     const board = S.presentIds
-      .map(id => ({ id, name: pname(id), score: scores[id] || 0 }))
+      .map(id => ({ id, name: pname(id), score: scores[id] || 0, matches: matchCountFor(id) }))
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
     const matchNum = rounds.length + 1;
@@ -1173,7 +1178,7 @@
             <span style="color:#475569;font-size:1.4vh;width:2vh">${i+1}</span>
             <span style="font-size:1.8vh;${top ? 'color:#fde68a;font-weight:700' : ''}">${p.name}</span>
           </div>
-          <span style="font-weight:700;font-size:2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
+          <span style="font-weight:700;font-size:2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score} <span style="font-size:1.3vh;font-weight:400;color:#64748b">(${p.matches})</span></span>
         </div>`;
       }).join('')}
       ${(S.restingIds||[]).length > 0 ? `
@@ -1194,7 +1199,7 @@
   function renderNewCycle() {
     const { cycleCount, scores } = S;
     const board = S.presentIds
-      .map(id => ({ id, name: pname(id), score: scores[id] || 0 }))
+      .map(id => ({ id, name: pname(id), score: scores[id] || 0, matches: matchCountFor(id) }))
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
     return `
@@ -1223,7 +1228,7 @@
             <span style="font-size:2vh">${medals[i] || `${i+1}.`}</span>
             <span style="font-size:1.9vh;${top ? 'color:#fde68a;font-weight:700' : ''}">${p.name}</span>
           </div>
-          <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
+          <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score} <span style="font-size:1.3vh;font-weight:400;color:#64748b">(${p.matches})</span></span>
         </div>`;
       }).join('')}
       ${(S.restingIds||[]).length > 0 ? `
@@ -1254,7 +1259,7 @@
   function renderFinal() {
     const { scores } = S;
     const board = S.presentIds
-      .map(id => ({ id, name: pname(id), score: scores[id] || 0 }))
+      .map(id => ({ id, name: pname(id), score: scores[id] || 0, matches: matchCountFor(id) }))
       .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
     const topScore = board[0]?.score || 0;
@@ -1286,7 +1291,7 @@
             <span style="font-size:2.5vh">${medals[i] || `${i+1}.`}</span>
             <span style="font-size:1.9vh;${top ? 'color:#fde68a;font-weight:700' : 'font-weight:600'}">${p.name}</span>
           </div>
-          <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score}</span>
+          <span style="font-weight:700;font-size:2.2vh;${top ? 'color:#fde68a' : 'color:#cbd5e1'}">${p.score} <span style="font-size:1.3vh;font-weight:400;color:#64748b">(${p.matches})</span></span>
         </div>`;
       }).join('')}
       ${(S.restingIds||[]).length > 0 ? `
