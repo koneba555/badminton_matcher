@@ -309,6 +309,27 @@
     });
   }
 
+  // buildSchedule guarantees zero partner repeats WITHIN one generated schedule, but knows
+  // nothing about partnerships from an earlier schedule (e.g. after a mid-game player add
+  // forces a rebuild, or the previous schedule was exhausted). Try several shuffles and keep
+  // whichever produces the fewest repeats against the session's actual partner history, so a
+  // rebuild doesn't immediately re-pair two players who already partnered before.
+  function buildScheduleAvoidingRepeats(presentIds, usedPartners) {
+    const used = new Set(usedPartners || []);
+    // A full N-1-round schedule mathematically covers every possible pair exactly once
+    // somewhere across its rounds — so an already-used pair WILL reappear at some point in
+    // any freshly generated schedule; that's unavoidable and fine, since it'll be many
+    // cycles away by the time it's reached. What actually matters (and what a rebuild must
+    // avoid) is repeating a partnership in the very next cycle, so only that round is scored.
+    let best = null, bestRepeats = Infinity;
+    for (let attempt = 0; attempt < 300 && bestRepeats > 0; attempt++) {
+      const schedule = buildSchedule(shuffle([...presentIds]));
+      const repeats = schedule[0].filter(t => t.length === 2 && used.has(pairKey(t[0], t[1]))).length;
+      if (repeats < bestRepeats) { bestRepeats = repeats; best = schedule; }
+    }
+    return best;
+  }
+
   // Fixed team formation for tournament mode — set once, persists whole session
   function buildFixedTeams(ids) {
     const shuffled = shuffle([...ids]);
@@ -913,8 +934,9 @@
     let schedule = S.schedule || [];
     let nextIdx = (S.scheduleIdx ?? -1) + 1;
     if (nextIdx >= schedule.length) {
-      // Exhausted full schedule — regenerate with new shuffle
-      schedule = buildSchedule(shuffle([...S.presentIds]));
+      // Exhausted (or invalidated by a mid-game roster change) — regenerate, preferring
+      // whichever shuffle repeats the fewest partnerships against the session's history.
+      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners);
       nextIdx = 0;
     }
     S.schedule = schedule;

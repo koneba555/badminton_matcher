@@ -395,6 +395,68 @@ console.log('\n[tournament] bye fairness, 9 players, dual court, 8 brackets');
 function matchCountOf(S, id) {
   return (S.rounds || []).filter(r => (r.courtTeam||[]).includes(id) || (r.challengerTeam||[]).includes(id)).length;
 }
+function pairKeyLocal2(a, b) { return a < b ? `${a},${b}` : `${b},${a}`; }
+
+// ── Test 8: buildScheduleAvoidingRepeats — a rebuild must not repeat the very next cycle's
+// partnerships when unused combinations exist (this was the bug: adding a player mid-round
+// forces a schedule rebuild, and the naive rebuild ignored partner history entirely) ──
+console.log('\n[buildScheduleAvoidingRepeats] avoids repeating the immediate next cycle');
+{
+  const ctx = freshContext();
+  // 6 players, one full perfect matching already used — a full round-robin schedule is
+  // guaranteed to reuse every pair SOMEWHERE eventually, but the very next cycle must not.
+  const presentIds = [1, 2, 3, 4, 5, 6];
+  const usedPartners = ['1,2', '3,4', '5,6'];
+  let zeroFound = 0;
+  const trials = 30;
+  for (let t = 0; t < trials; t++) {
+    const sched = ctx.buildScheduleAvoidingRepeats(presentIds, usedPartners);
+    const used = new Set(usedPartners);
+    const repeats = sched[0].filter(team => team.length === 2 && used.has(pairKeyLocal2(team[0], team[1]))).length;
+    if (repeats === 0) zeroFound++;
+  }
+  check(`finds a zero-repeat next cycle every time (${zeroFound}/${trials})`, zeroFound === trials);
+}
+
+// ── Test 9: end-to-end — mid-game add during dual-court play must not cause the following
+// cycle to repeat a partnership while unused combinations remain ──
+console.log('\n[mid-game] dual-court add-player does not repeat partnerships next cycle');
+{
+  let totalRepeats = 0, totalTrials = 30;
+  for (let trial = 0; trial < totalTrials; trial++) {
+    const ctx = freshContext();
+    const S = ctx.__S;
+    const n0 = 6 + (trial % 6);
+    S.players = Array.from({ length: n0 }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+    S.presentIds = S.players.map(p => p.id);
+    S.nextId = n0 + 1;
+    S.mode = trial % 2 === 0 ? 'full' : 'limited';
+    S.matchesPerCycle = 3;
+    S.dualCourt = true;
+    ctx.startSession();
+    let guard = 0;
+    for (let m = 0; m < 1 + (trial % 3) && guard++ < 50; m++) {
+      const aReady = S.courtIdx != null && S.challengerIdx != null;
+      const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+      if (!aReady && !bReady) break;
+      if (aReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+      else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+    }
+    ctx.addPlayerMidGame(null, `New${trial}`);
+    guard = 0;
+    while (S.screen === 'playing' && guard++ < 100) {
+      const aReady = S.courtIdx != null && S.challengerIdx != null;
+      const bReady = S.courtIdxB != null && S.challengerIdxB != null;
+      if (!aReady && !bReady) break;
+      if (aReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+      else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+    }
+    const usedBefore = new Set(S.usedPartners);
+    ctx.startNewCycle();
+    totalRepeats += S.teams.filter(t => t.length === 2 && usedBefore.has(pairKeyLocal2(t[0], t[1]))).length;
+  }
+  check(`zero partner repeats across ${totalTrials} mid-game-add trials`, totalRepeats === 0);
+}
 
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
