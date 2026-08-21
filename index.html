@@ -62,6 +62,7 @@
       teamMatchDeficit: {},      // {playerId: idealMatches - actualMatches, accumulated} — full/limited mode fairness across cycles
       limitedQueue: [],          // precomputed [teamIdxA, teamIdxB] pairs for the current 'limited' mode cycle
       limitedPlayedPairs: [],    // "i,j" team-idx pairs ever played in limited mode — minimizes rematches across cycles
+      newbieIds: [],             // playerIds tagged "new player" (🐥) — schedule generation avoids leaving them solo
     };
   }
 
@@ -93,6 +94,9 @@
   let rematchRepeatedPairs = [];  // [[id,id], ...] pairs flagged as repeats in the pending cycle
   let pendingSchedule = null;
   let pendingScheduleIdx = 0;
+  let newbieBubble = null;       // {playerId, x, y} while the long-press 🐥 bubble is open
+  let longPressTimer = null;
+  let longPressFired = false;    // set true when a hold fires the bubble, to suppress the trailing click
   let theme = localStorage.getItem('bmt_theme') || 'light';
 
   // Dark → Light pastel color map (applied via replaceAll on rendered HTML)
@@ -318,18 +322,27 @@
   // forces a rebuild, or the previous schedule was exhausted). Try several shuffles and keep
   // whichever produces the fewest repeats against the session's actual partner history, so a
   // rebuild doesn't immediately re-pair two players who already partnered before.
-  function buildScheduleAvoidingRepeats(presentIds, usedPartners) {
+  // Builds a schedule while steering the very next cycle away from two problems:
+  //  - repeating a partnership that's already happened (when unused combos still exist)
+  //  - leaving a 🐥-tagged newbie without a partner (solo) when a non-newbie could take
+  //    the solo slot instead
+  // A full N-1-round schedule mathematically covers every possible pair — and gives every
+  // player exactly one solo turn when N is odd — somewhere across its rounds, so neither
+  // problem can be eliminated schedule-wide; that's fine, since it'll be many cycles away
+  // by the time it's reached. What matters is steering the IMMEDIATE next cycle, so only
+  // that round is scored (repeats weighted far above the newbie-solo tiebreak).
+  function buildScheduleAvoidingRepeats(presentIds, usedPartners, newbieIds) {
     const used = new Set(usedPartners || []);
-    // A full N-1-round schedule mathematically covers every possible pair exactly once
-    // somewhere across its rounds — so an already-used pair WILL reappear at some point in
-    // any freshly generated schedule; that's unavoidable and fine, since it'll be many
-    // cycles away by the time it's reached. What actually matters (and what a rebuild must
-    // avoid) is repeating a partnership in the very next cycle, so only that round is scored.
-    let best = null, bestRepeats = Infinity;
-    for (let attempt = 0; attempt < 300 && bestRepeats > 0; attempt++) {
+    const newbies = new Set(newbieIds || []);
+    let best = null, bestScore = Infinity;
+    for (let attempt = 0; attempt < 300 && bestScore > 0; attempt++) {
       const schedule = buildSchedule(shuffle([...presentIds]));
-      const repeats = schedule[0].filter(t => t.length === 2 && used.has(pairKey(t[0], t[1]))).length;
-      if (repeats < bestRepeats) { bestRepeats = repeats; best = schedule; }
+      const firstCycle = schedule[0];
+      const repeats = firstCycle.filter(t => t.length === 2 && used.has(pairKey(t[0], t[1]))).length;
+      const soloTeam = firstCycle.find(t => t.length === 1);
+      const newbieSolo = soloTeam && newbies.has(soloTeam[0]) ? 1 : 0;
+      const score = repeats * 10 + newbieSolo;
+      if (score < bestScore) { bestScore = score; best = schedule; }
     }
     return best;
   }
@@ -479,11 +492,19 @@
   function removePlayer(id) {
     S.players = S.players.filter(p => p.id !== id);
     S.presentIds = S.presentIds.filter(x => x !== id);
+    S.newbieIds = (S.newbieIds || []).filter(x => x !== id);
     save(); render();
   }
   function togglePresent(id) {
     const i = S.presentIds.indexOf(id);
     if (i >= 0) S.presentIds.splice(i, 1); else S.presentIds.push(id);
+    save(); render();
+  }
+  function toggleNewbie(id) {
+    const set = new Set(S.newbieIds || []);
+    if (set.has(id)) set.delete(id); else set.add(id);
+    S.newbieIds = [...set];
+    newbieBubble = null;
     save(); render();
   }
   function clearAll() { S = defaultState(); save(); render(); }
@@ -738,7 +759,7 @@
       save(); render();
       return;
     }
-    const schedule = buildSchedule(shuffle([...S.presentIds]));
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, [], S.newbieIds);
     Object.assign(S, {
       screen: 'playing',
       rounds: [],
@@ -940,7 +961,7 @@
     if (nextIdx >= schedule.length) {
       // Exhausted (or invalidated by a mid-game roster change) — regenerate, preferring
       // whichever shuffle repeats the fewest partnerships against the session's history.
-      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners);
+      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds);
       nextIdx = 0;
     }
     proceedOrWarnRematch(schedule, nextIdx);
@@ -980,7 +1001,7 @@
   }
 
   function retryRematchShuffle() {
-    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners);
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds);
     proceedOrWarnRematch(schedule, 0);
   }
 
@@ -1089,6 +1110,7 @@
     if (showSummary) html += renderSummaryModal();
     if (showAddPlayer) html += renderAddPlayerPanel();
     if (showRematchWarning) html += renderRematchWarningModal();
+    if (newbieBubble) html += renderNewbieBubble();
     // Theme toggle button (fixed top-left)
     html += `<button id="themeToggleBtn" class="btn" style="position:fixed;top:1.2vh;left:2vw;z-index:50;background:${theme==='dark'?'#334155':'#c8dff0'};color:${theme==='dark'?'#94a3b8':'#374151'};border-radius:8px;padding:0.4vh 0.8vh;font-size:1.8vh">${theme==='dark'?'☀️':'🌙'}</button>`;
     if (theme === 'light') DARK_TO_LIGHT.forEach(([d,l]) => { html = html.replaceAll(d, l); });
@@ -1127,6 +1149,22 @@
         style="background:#3f1212;color:#fca5a5;border:1px solid #7f1d1d;border-radius:10px;padding:0.8vh 1.5vh;font-size:1.6vh;font-weight:600">${p.name} ✕</button>`).join('')}
     </div>` : ''}
   </div>
+</div>`;
+  }
+
+  function renderNewbieBubble() {
+    const p = S.players.find(pl => pl.id === newbieBubble.playerId);
+    if (!p) return '';
+    const isNewbie = (S.newbieIds || []).includes(p.id);
+    const vw = (typeof window !== 'undefined' ? window.innerWidth : 400);
+    const bx = Math.min(Math.max(newbieBubble.x, 70), vw - 70);
+    const by = Math.max(newbieBubble.y - 60, 10);
+    return `
+<div id="newbieBackdrop" style="position:fixed;inset:0;z-index:119"></div>
+<div id="newbieBubble" class="fade-in" style="position:fixed;left:${bx}px;top:${by}px;transform:translate(-50%,-100%);background:#1e293b;border:1px solid #334155;border-radius:14px;padding:1vh 1.2vh;z-index:120;box-shadow:0 4px 16px rgba(0,0,0,0.4);display:flex;align-items:center;gap:0.8vh;white-space:nowrap">
+  <span style="font-size:1.4vh;color:#94a3b8">${p.name}</span>
+  <button id="newbieToggleBtn" class="btn" data-id="${p.id}"
+    style="background:${isNewbie ? '#78350f' : '#334155'};color:${isNewbie ? '#fde68a' : '#94a3b8'};border-radius:10px;padding:0.6vh 1vh;font-size:1.8vh">🐥${isNewbie ? ' ✓ มือใหม่' : ' มือใหม่?'}</button>
 </div>`;
   }
 
@@ -1294,15 +1332,16 @@
       : `<div style="height:100%;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(${rows},1fr);gap:1vh">
           ${players.map(p => {
             const on = presentIds.includes(p.id);
+            const isNewbie = (S.newbieIds || []).includes(p.id);
             if (deleteMode) return `
 <button class="del-btn btn del-mode-card" data-id="${p.id}"
   style="width:100%;height:100%;border-radius:16px;font-size:4vh;font-weight:700;display:flex;align-items:center;justify-content:center">
   ✕
 </button>`;
             return `
-<button class="tog btn" data-id="${p.id}"
-  style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
-    background:${on ? '#2563eb' : '#1e293b'};color:${on ? '#fff' : '#94a3b8'}">
+<button class="tog btn" data-id="${p.id}" style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
+    background:${on ? '#2563eb' : '#1e293b'};color:${on ? '#fff' : '#94a3b8'};position:relative">
+  ${isNewbie ? '<span style="position:absolute;top:0.4vh;right:0.6vh;font-size:1.6vh">🐥</span>' : ''}
   ${p.name}
 </button>`;
           }).join('')}
@@ -1644,7 +1683,30 @@
     const inp = q('inp');
     q('addBtn')?.addEventListener('click', () => { addPlayer(inp.value); inp.value = ''; inp.focus(); });
     inp?.addEventListener('keydown', e => { if (e.key === 'Enter') { addPlayer(inp.value); inp.value = ''; } });
-    qa('.tog').forEach(b => b.addEventListener('click', () => togglePresent(+b.dataset.id)));
+    qa('.tog').forEach(b => {
+      b.addEventListener('click', () => {
+        if (longPressFired) { longPressFired = false; return; } // suppress the tap that follows a long-press
+        togglePresent(+b.dataset.id);
+      });
+      const id = +b.dataset.id;
+      const startPress = (e) => {
+        const point = e.touches ? e.touches[0] : e;
+        const x = point.clientX, y = point.clientY;
+        clearTimeout(longPressTimer);
+        longPressTimer = setTimeout(() => {
+          longPressFired = true;
+          newbieBubble = { playerId: id, x, y };
+          render();
+        }, 500);
+      };
+      const cancelPress = () => clearTimeout(longPressTimer);
+      b.addEventListener('touchstart', startPress, { passive: true });
+      b.addEventListener('touchend', cancelPress);
+      b.addEventListener('touchmove', cancelPress);
+      b.addEventListener('mousedown', startPress);
+      b.addEventListener('mouseup', cancelPress);
+      b.addEventListener('mouseleave', cancelPress);
+    });
     qa('.del-btn').forEach(b => b.addEventListener('click', () => { removePlayer(+b.dataset.id); }));
     q('startBtn')?.addEventListener('click', startSession);
     q('clearAllBtn')?.addEventListener('click', () => { if (confirm('ล้างข้อมูลทั้งหมด?')) { deleteMode = false; clearAll(); } });
@@ -1671,6 +1733,10 @@
     // Rematch warning modal
     q('rematchRetryBtn')?.addEventListener('click', retryRematchShuffle);
     q('rematchProceedBtn')?.addEventListener('click', confirmRematchProceed);
+
+    // Newbie 🐥 bubble
+    q('newbieToggleBtn')?.addEventListener('click', (e) => toggleNewbie(+e.currentTarget.dataset.id));
+    q('newbieBackdrop')?.addEventListener('click', () => { newbieBubble = null; render(); });
 
     // Add player panel
     q('closeAddPlayerBtn')?.addEventListener('click', () => { showAddPlayer = false; render(); });

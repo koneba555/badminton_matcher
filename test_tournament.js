@@ -490,5 +490,20 @@ console.log('\n[rematch warning] modal triggers, retry and proceed both work');
     JSON.stringify(ctx.__S.teams) === JSON.stringify(forcedSchedule[0]));
 }
 
+// ── Test 11: newbie 🐥 tag — schedule generation avoids leaving a tagged newbie solo ──
+console.log('\n[buildScheduleAvoidingRepeats] avoids leaving a 🐥 newbie solo when odd team count');
+{
+  const ctx = freshContext();
+  const presentIds = [1, 2, 3, 4, 5]; // odd N -> one solo team every round
+  let newbieSoloCount = 0;
+  const trials = 100;
+  for (let t = 0; t < trials; t++) {
+    const sched = ctx.buildScheduleAvoidingRepeats(presentIds, [], [1]); // player 1 tagged newbie
+    const solo = sched[0].find(team => team.length === 1);
+    if (solo && solo[0] === 1) newbieSoloCount++;
+  }
+  check(`newbie almost never ends up solo (${newbieSoloCount}/${trials}, baseline random ~20)`, newbieSoloCount <= 3);
+}
+
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
