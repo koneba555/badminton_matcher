@@ -14,6 +14,8 @@ if (!scriptMatch) throw new Error('script block not found');
 const code = scriptMatch[1] + `
 globalThis.__S = S;
 globalThis.__setS = (v) => { S = v; globalThis.__S = S; };
+Object.defineProperty(globalThis, '__rematchRepeatedPairs', { get: () => rematchRepeatedPairs });
+Object.defineProperty(globalThis, '__showRematchWarning', { get: () => showRematchWarning });
 `;
 
 function makeEl() {
@@ -453,9 +455,39 @@ console.log('\n[mid-game] dual-court add-player does not repeat partnerships nex
     }
     const usedBefore = new Set(S.usedPartners);
     ctx.startNewCycle();
+    if (S.screen === 'newcycle') ctx.confirmRematchProceed(); // rematch modal triggered — accept it to inspect the pending teams
     totalRepeats += S.teams.filter(t => t.length === 2 && usedBefore.has(pairKeyLocal2(t[0], t[1]))).length;
   }
   check(`zero partner repeats across ${totalTrials} mid-game-add trials`, totalRepeats === 0);
+}
+
+// ── Test 10: rematch warning modal — triggers on a forced repeat, and both actions work ──
+console.log('\n[rematch warning] modal triggers, retry and proceed both work');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.mode = 'full';
+  ctx.startSession();
+  // Force a guaranteed-repeat scenario: hand the checker a schedule whose first cycle
+  // exactly matches an already-used partnership, while plenty of other combos remain unused.
+  S.usedPartners = ['1,2', '3,4', '5,6'];
+  const forcedSchedule = [[[1, 2], [3, 4], [5, 6]]];
+  ctx.proceedOrWarnRematch(forcedSchedule, 0);
+  check('modal opens on a forced repeat', ctx.__showRematchWarning === true);
+  check('flags the exact repeated pairs', JSON.stringify(ctx.__rematchRepeatedPairs) === JSON.stringify([[1,2],[3,4],[5,6]]));
+
+  ctx.retryRematchShuffle();
+  // retry draws a fresh (avoided-repeat) schedule — for 6 players this should always succeed
+  check('retry finds a non-repeating arrangement and proceeds to playing', ctx.__S.screen === 'playing' && ctx.__showRematchWarning === false);
+
+  // Force it again, this time accept the repeat via "เล่นต่อเลย"
+  ctx.proceedOrWarnRematch(forcedSchedule, 0);
+  check('modal reopens on a second forced repeat', ctx.__showRematchWarning === true);
+  ctx.confirmRematchProceed();
+  check('confirming proceeds to playing with the repeated pairing', ctx.__S.screen === 'playing' &&
+    JSON.stringify(ctx.__S.teams) === JSON.stringify(forcedSchedule[0]));
 }
 
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);

@@ -89,6 +89,10 @@
   let summaryCycle = 1;
   let undoStack = [];
   let showAddPlayer = false;
+  let showRematchWarning = false;
+  let rematchRepeatedPairs = [];  // [[id,id], ...] pairs flagged as repeats in the pending cycle
+  let pendingSchedule = null;
+  let pendingScheduleIdx = 0;
   let theme = localStorage.getItem('bmt_theme') || 'light';
 
   // Dark → Light pastel color map (applied via replaceAll on rendered HTML)
@@ -939,11 +943,45 @@
       schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners);
       nextIdx = 0;
     }
+    proceedOrWarnRematch(schedule, nextIdx);
+  }
+
+  // If the upcoming cycle repeats a partnership while unused combinations still exist,
+  // pause and let the user choose to reshuffle instead of silently starting a repeat.
+  function proceedOrWarnRematch(schedule, nextIdx) {
+    const used = new Set(S.usedPartners);
+    const upcoming = schedule[nextIdx];
+    const repeats = upcoming.filter(t => t.length === 2 && used.has(pairKey(t[0], t[1])));
+    if (repeats.length > 0 && !allPartnersUsed()) {
+      pendingSchedule = schedule;
+      pendingScheduleIdx = nextIdx;
+      rematchRepeatedPairs = repeats;
+      showRematchWarning = true;
+      render();
+      return;
+    }
+    finalizeNewCycle(schedule, nextIdx);
+  }
+
+  function finalizeNewCycle(schedule, nextIdx) {
     S.schedule = schedule;
     S.scheduleIdx = nextIdx;
     S.screen = 'playing';
     initCycle(schedule[nextIdx]);
+    showRematchWarning = false;
+    pendingSchedule = null;
+    rematchRepeatedPairs = [];
     save(); render();
+  }
+
+  function confirmRematchProceed() {
+    if (!pendingSchedule) return;
+    finalizeNewCycle(pendingSchedule, pendingScheduleIdx);
+  }
+
+  function retryRematchShuffle() {
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners);
+    proceedOrWarnRematch(schedule, 0);
   }
 
   // Exclude the OTHER court's current occupants (they're mid-match elsewhere, off-limits).
@@ -1050,6 +1088,7 @@
     let html = (screens[S.screen] || renderSetup)();
     if (showSummary) html += renderSummaryModal();
     if (showAddPlayer) html += renderAddPlayerPanel();
+    if (showRematchWarning) html += renderRematchWarningModal();
     // Theme toggle button (fixed top-left)
     html += `<button id="themeToggleBtn" class="btn" style="position:fixed;top:1.2vh;left:2vw;z-index:50;background:${theme==='dark'?'#334155':'#c8dff0'};color:${theme==='dark'?'#94a3b8':'#374151'};border-radius:8px;padding:0.4vh 0.8vh;font-size:1.8vh">${theme==='dark'?'☀️':'🌙'}</button>`;
     if (theme === 'light') DARK_TO_LIGHT.forEach(([d,l]) => { html = html.replaceAll(d, l); });
@@ -1087,6 +1126,23 @@
       ${present.map(p => `<button class="remove-present-btn btn" data-id="${p.id}"
         style="background:#3f1212;color:#fca5a5;border:1px solid #7f1d1d;border-radius:10px;padding:0.8vh 1.5vh;font-size:1.6vh;font-weight:600">${p.name} ✕</button>`).join('')}
     </div>` : ''}
+  </div>
+</div>`;
+  }
+
+  function renderRematchWarningModal() {
+    const pairNames = rematchRepeatedPairs.map(t => t.map(pname).join(' & '));
+    return `
+<div id="rematchWarningOverlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:110;padding:2vw">
+  <div style="background:#1e293b;border-radius:20px;padding:2.2vh;width:100%;max-width:88vw;max-height:85dvh;overflow-y:auto;text-align:center">
+    <div style="font-size:3vh">⚠️</div>
+    <div style="font-size:1.9vh;font-weight:800;margin-top:0.6vh;color:#fbbf24">พบคู่ซ้ำในรอบถัดไป</div>
+    <div style="font-size:1.5vh;color:#94a3b8;margin-top:0.8vh">คู่ที่ซ้ำ: ${pairNames.join(', ')}</div>
+    <div style="font-size:1.4vh;color:#64748b;margin-top:0.5vh">ทั้งที่ยังมีคู่ที่ไม่เคยจับกันอยู่ ต้องการจับคู่ใหม่ไหม?</div>
+    <div style="display:flex;flex-direction:column;gap:1vh;margin-top:1.8vh">
+      <button id="rematchRetryBtn" class="btn" style="background:#2563eb;color:#fff;border-radius:14px;padding:1.4vh;font-size:1.7vh;font-weight:700">🔄 จับคู่ใหม่</button>
+      <button id="rematchProceedBtn" class="btn" style="background:#334155;color:#94a3b8;border-radius:14px;padding:1.2vh;font-size:1.5vh">เล่นต่อเลย (คู่ซ้ำ)</button>
+    </div>
   </div>
 </div>`;
   }
@@ -1611,6 +1667,10 @@
 
     // New cycle
     q('newCycleBtn')?.addEventListener('click', startNewCycle);
+
+    // Rematch warning modal
+    q('rematchRetryBtn')?.addEventListener('click', retryRematchShuffle);
+    q('rematchProceedBtn')?.addEventListener('click', confirmRematchProceed);
 
     // Add player panel
     q('closeAddPlayerBtn')?.addEventListener('click', () => { showAddPlayer = false; render(); });
