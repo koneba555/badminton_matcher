@@ -1316,8 +1316,9 @@
             const isNewbie = (S.newbieIds || []).includes(p.id);
             if (deleteMode) return `
 <button class="del-btn btn del-mode-card" data-id="${p.id}"
-  style="width:100%;height:100%;border-radius:16px;font-size:4vh;font-weight:700;display:flex;align-items:center;justify-content:center">
-  ✕
+  style="width:100%;height:100%;border-radius:16px;font-weight:700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.4vh">
+  <span style="font-size:3vh">✕</span>
+  <span style="font-size:1.6vh">${p.name}</span>
 </button>`;
             if (newbieMode) return `
 <button class="newbie-btn btn" data-id="${p.id}" style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
