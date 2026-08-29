@@ -63,6 +63,7 @@
       limitedQueue: [],          // precomputed [teamIdxA, teamIdxB] pairs for the current 'limited' mode cycle
       limitedPlayedPairs: [],    // "i,j" team-idx pairs ever played in limited mode — minimizes rematches across cycles
       newbieIds: [],             // playerIds tagged "new player" (🐥) — schedule generation avoids leaving them solo
+      singlesMode: false,        // true = each team is a single player (1v1) instead of pairs (2v2)
     };
   }
 
@@ -733,7 +734,8 @@
   }
 
   function startSession() {
-    if (S.presentIds.length < 4) return;
+    const minPlayers = S.singlesMode ? 2 : 4;
+    if (S.presentIds.length < minPlayers) return;
     undoStack = [];
     deleteMode = false;
     S.teamMatchDeficit = {};
@@ -753,6 +755,23 @@
         playerConsecutive: {},
       });
       startTournamentBracket();
+      save(); render();
+      return;
+    }
+    if (S.singlesMode) {
+      // No partners to form — each player is their own team, playing everyone directly.
+      const teams = shuffle([...S.presentIds]).map(id => [id]);
+      Object.assign(S, {
+        screen: 'playing',
+        rounds: [],
+        scores: Object.fromEntries(S.presentIds.map(id => [id, 0])),
+        usedPartners: [],
+        cycleCount: 1,
+        schedule: [],
+        scheduleIdx: -1,
+        playerConsecutive: {},
+      });
+      initCycle(teams);
       save(); render();
       return;
     }
@@ -950,6 +969,13 @@
     if (S.mode === 'tournament') {
       S.screen = 'playing';
       startTournamentBracket();
+      save(); render();
+      return;
+    }
+    if (S.singlesMode) {
+      // No partners involved — just re-run a fresh cycle over the same individuals.
+      S.screen = 'playing';
+      initCycle(S.teams.map(t => [...t]));
       save(); render();
       return;
     }
@@ -1288,7 +1314,8 @@
   function renderSetup() {
     if (S.mode === 'tournament') S.mode = 'full'; // tournament mode paused — fall back
     const { players, presentIds } = S;
-    const ok = presentIds.length >= 4;
+    const minPlayers = S.singlesMode ? 2 : 4;
+    const ok = presentIds.length >= minPlayers;
     const rows = Math.max(1, Math.ceil(players.length / 3));
     return `
 <div class="fade-in" style="display:flex;flex-direction:column;height:100%;gap:1.5vh">
@@ -1338,7 +1365,7 @@
 
   <div style="flex-shrink:0;text-align:center;color:#94a3b8;font-size:1.6vh">
     เลือกแล้ว <strong style="color:#f1f5f9">${presentIds.length}</strong> คน
-    ${presentIds.length < 4 ? '<span style="color:#64748b"> — ต้องการอย่างน้อย 4 คน</span>' : ''}
+    ${presentIds.length < minPlayers ? `<span style="color:#64748b"> — ต้องการอย่างน้อย ${minPlayers} คน</span>` : ''}
   </div>
 
   <!-- Mode selector -->
@@ -1363,13 +1390,17 @@
         background:${S.dualCourt ? '#16a34a' : '#334155'};color:${S.dualCourt ? '#fff' : '#94a3b8'}">
         🟩🟩${S.dualCourt ? ' ✓' : ''}
       </button>
+      <button id="singlesModeBtn" class="btn" title="เล่นเดี่ยว (1 ต่อ 1)" style="flex:0 0 auto;padding:1.2vh;border-radius:12px;font-size:2vh;font-weight:700;
+        background:${S.singlesMode ? '#7c3aed' : '#334155'};color:${S.singlesMode ? '#fff' : '#94a3b8'}">
+        🧍${S.singlesMode ? ' ✓' : ''}
+      </button>
     </div>
     ${S.mode === 'limited' ? (() => {
       const cap = S.matchesPerCycle || 3;
       const n = presentIds.length;
-      const numTeams = n > 0 ? Math.ceil(n / 2) : 0;
+      const numTeams = S.singlesMode ? n : (n > 0 ? Math.ceil(n / 2) : 0);
       const maxPerTeam = numTeams - 1;
-      const warn = n >= 4 && cap > maxPerTeam;
+      const warn = n >= minPlayers && cap > maxPerTeam;
       return `
     <div style="display:flex;align-items:center;justify-content:center;gap:2vh;margin-top:1.2vh">
       <span style="color:#94a3b8;font-size:1.6vh">สูงสุด (แมต/ทีม):</span>
@@ -1396,11 +1427,12 @@
         border-radius:12px;padding:0.6vh 1.5vh;font-size:2vh;border:1px solid ${deleteMode ? '#991b1b' : '#334155'}">
       ${deleteMode ? '✕ ปิดโหมดลบ' : '🗑️ ลบรายชื่อ'}
     </button>
+    ${!S.singlesMode ? `
     <button id="toggleNewbieModeBtn" class="btn"
       style="background:${newbieMode ? '#78350f' : '#1e293b'};color:${newbieMode ? '#fde68a' : '#64748b'};
         border-radius:12px;padding:0.6vh 1.5vh;font-size:2vh;border:1px solid ${newbieMode ? '#d97706' : '#334155'}">
       ${newbieMode ? '✕ ปิดโหมดมือใหม่' : '🐥 มือใหม่'}
-    </button>
+    </button>` : ''}
     <button id="clearAllBtn" class="btn" style="background:none;color:#475569;font-size:1.5vh;padding:0.6vh 1vh">ล้างทั้งหมด</button>
   </div>` : '<div></div>'}
 </div>`;
@@ -1431,14 +1463,14 @@
     <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:1vh;align-items:center">
       <div style="text-align:center">
         <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
-          👑 COURT${courtTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
+          👑 COURT${courtTeam.length === 1 && !S.singlesMode ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
         </div>
         ${courtTeam.map(id => `<div style="font-weight:700;color:#93c5fd;font-size:${S.dualCourt ? 2.0 : 2.4}vh;line-height:1.4">${pname(id)}</div>`).join('')}
       </div>
       <div style="font-size:${S.dualCourt ? 2.4 : 2.8}vh;font-weight:900;color:#475569;padding:0 1vh">VS</div>
       <div style="text-align:center">
         <div style="color:#94a3b8;font-size:1.3vh;font-weight:700;letter-spacing:.08em;margin-bottom:0.8vh">
-          ⚡ CHALLENGER${challengerTeam.length === 1 ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
+          ⚡ CHALLENGER${challengerTeam.length === 1 && !S.singlesMode ? ' <span style="color:#fbbf24;font-size:1.1vh">(1 คน)</span>' : ''}
         </div>
         ${challengerTeam.map(id => `<div style="font-weight:700;color:#fca5a5;font-size:${S.dualCourt ? 2.0 : 2.4}vh;line-height:1.4">${pname(id)}</div>`).join('')}
       </div>
@@ -1686,6 +1718,7 @@
     q('modeLimitedBtn')?.addEventListener('click', () => { S.mode = 'limited'; save(); render(); });
     q('modeTournamentBtn')?.addEventListener('click', () => { S.mode = 'tournament'; save(); render(); });
     q('dualCourtBtn')?.addEventListener('click', () => { S.dualCourt = !S.dualCourt; save(); render(); });
+    q('singlesModeBtn')?.addEventListener('click', () => { S.singlesMode = !S.singlesMode; save(); render(); });
     q('matchesDecBtn')?.addEventListener('click', () => { S.matchesPerCycle = Math.max(1, (S.matchesPerCycle || 3) - 1); save(); render(); });
     q('matchesIncBtn')?.addEventListener('click', () => { S.matchesPerCycle = Math.min(30, (S.matchesPerCycle || 3) + 1); save(); render(); });
 

@@ -505,5 +505,44 @@ console.log('\n[buildScheduleAvoidingRepeats] avoids leaving a 🐥 newbie solo 
   check(`newbie almost never ends up solo (${newbieSoloCount}/${trials}, baseline random ~20)`, newbieSoloCount <= 3);
 }
 
+// ── Test 12: singles mode (1v1) — every team stays size 1, no pairing/partner logic runs ──
+console.log('\n[singles mode] every team is a single player, full and limited, dual court');
+{
+  let fails = 0;
+  for (let trial = 0; trial < 60; trial++) {
+    const n = 2 + (trial % 10);
+    const mode = trial % 2 === 0 ? 'full' : 'limited';
+    const dual = trial % 3 !== 0;
+    const ctx = freshContext();
+    const S = ctx.__S;
+    S.players = Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+    S.presentIds = S.players.map(p => p.id);
+    S.mode = mode;
+    S.dualCourt = dual;
+    S.matchesPerCycle = 2 + (trial % 4);
+    S.singlesMode = true;
+    try {
+      ctx.startSession();
+      if (S.teams.some(t => t.length !== 1)) throw new Error(`non-single team after startSession (n=${n}, mode=${mode})`);
+      let guard = 0, cycles = 0;
+      while (cycles < 3 && guard++ < 3000) {
+        if (S.screen === 'newcycle') { ctx.startNewCycle(); cycles++; continue; }
+        if (S.screen !== 'playing') break;
+        const aReady = S.courtIdx != null && S.challengerIdx != null;
+        const bReady = dual && S.courtIdxB != null && S.challengerIdxB != null;
+        if (!aReady && !bReady) throw new Error(`softlock (n=${n}, mode=${mode}, dual=${dual})`);
+        if (aReady && (Math.random() < 0.5 || !bReady)) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+        else if (bReady) ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'B');
+        if (S.teams.some(t => t.length !== 1)) throw new Error(`team size changed mid-play (n=${n}, mode=${mode})`);
+      }
+      if (guard >= 3000) throw new Error(`guard hit (n=${n}, mode=${mode}, dual=${dual})`);
+    } catch (e) {
+      fails++;
+      console.log(`  FAIL trial ${trial}: ${e.message}`);
+    }
+  }
+  check(`60 singles-mode trials run clean (0 failures)`, fails === 0);
+}
+
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
