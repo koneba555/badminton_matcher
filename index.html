@@ -1338,7 +1338,6 @@
     const { players, presentIds } = S;
     const minPlayers = S.singlesMode ? 2 : 4;
     const ok = presentIds.length >= minPlayers;
-    const rows = Math.max(1, Math.ceil(players.length / 3));
     return `
 <div class="fade-in" style="display:flex;flex-direction:column;height:100%;gap:1.5vh">
   <div style="text-align:center;flex-shrink:0">
@@ -1356,10 +1355,10 @@
     </div>
   </div>
 
-  <div style="flex:1;overflow:hidden;min-height:0">
+  <div style="flex:1;overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch">
     ${players.length === 0
       ? `<div style="height:100%;${C.card}display:flex;align-items:center;justify-content:center;color:#64748b;font-size:1.8vh">ยังไม่มีรายชื่อผู้เล่น</div>`
-      : `<div style="height:100%;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(${rows},1fr);gap:1vh">
+      : `<div style="min-height:100%;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:minmax(9vh,1fr);gap:1vh">
           ${players.map(p => {
             const on = presentIds.includes(p.id);
             const isNewbie = (S.newbieIds || []).includes(p.id);
