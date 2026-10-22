@@ -1476,6 +1476,32 @@
   }
 
   // ── Playing Screen ─────────────────────────────────────────────────
+  // Preview of who this idle court plays next, while it waits for the other court to finish.
+  function waitingPreviewHtml(slot) {
+    const otherSlot = slot === 'A' ? 'B' : 'A';
+    const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
+    const names = i => S.teams[i].map(pname).join(' & ');
+    const row = txt => `<div style="margin-top:0.8vh;padding-top:0.8vh;border-top:1px solid #334155;color:#93c5fd;font-size:1.5vh;font-weight:700">${txt}</div>`;
+    if (S.mode === 'limited') {
+      // When a court frees up, A re-seeds first (takes the head of the queue), then B takes
+      // the first remaining pair that doesn't reuse A's teams.
+      const q = S.limitedQueue || [];
+      let next = q[0];
+      if (next && slot === 'B') next = q.slice(1).find(([a, b]) => a !== q[0][0] && a !== q[0][1] && b !== q[0][0] && b !== q[0][1]);
+      if (!next) return '';
+      return row(`▶ แมตช์ถัดไป: ${names(next[0])} vs ${names(next[1])}`);
+    }
+    if (S.mode === 'full' && S[courtField] != null) {
+      const oc = slot === 'A' ? [S.courtIdxB, S.challengerIdxB] : [S.courtIdx, S.challengerIdx];
+      const played = new Set(S.cyclePlayedPairs);
+      const cands = oc.filter(i => i != null && !played.has(tpKey(S[courtField], i)));
+      if (cands.length === 0) return '';
+      const hint = cands.length > 1 ? ` <span style="color:#64748b;font-weight:400">(ขึ้นกับผลคอร์ด ${otherSlot})</span>` : '';
+      return row(`▶ คาดว่าถัดไปเจอ: ${cands.map(names).join('  หรือ  ')}${hint}`);
+    }
+    return '';
+  }
+
   function renderMatchCard(slot) {
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const challField = slot === 'A' ? 'challengerIdx' : 'challengerIdxB';
@@ -1484,13 +1510,14 @@
     const label = S.dualCourt ? `<div style="text-align:center;color:#64748b;font-size:1.3vh;font-weight:700;margin-bottom:0.8vh">🏟️ คอร์ด ${slot}</div>` : '';
 
     if (courtI === null || courtI === undefined) {
-      return `<div style="flex-shrink:0;${C.card}text-align:center;color:#475569;font-size:1.6vh;padding:2.5vh 1vh">${label}คอร์ดนี้จบแล้ว รอรอบถัดไป</div>`;
+      return `<div style="flex-shrink:0;${C.card}text-align:center;color:#475569;font-size:1.6vh;padding:2.5vh 1vh">${label}${(S.mode === 'limited' && (S.limitedQueue || []).length > 0) ? '⏳ รออีกคอร์ดเล่นจบก่อน' : 'คอร์ดนี้จบแล้ว รอรอบถัดไป'}${waitingPreviewHtml(slot)}</div>`;
     }
     if (challI === null || challI === undefined) {
       return `<div style="flex-shrink:0;${C.card}text-align:center;padding:2vh 1vh">
         ${label}
         <div style="font-weight:700;color:#93c5fd;font-size:2vh;margin-bottom:0.6vh">${S.teams[courtI].map(pname).join(' & ')}</div>
         <div style="color:#64748b;font-size:1.5vh">⏳ รออีกคอร์ดเล่นจบก่อน</div>
+        ${waitingPreviewHtml(slot)}
       </div>`;
     }
     const courtTeam = S.teams[courtI], challengerTeam = S.teams[challI];
