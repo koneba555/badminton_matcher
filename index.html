@@ -15,6 +15,10 @@
     button, input { touch-action: manipulation; }
     .fade-in { animation: fadeIn 0.2s ease; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .scroll-min { scrollbar-width: thin; scrollbar-color: rgba(148,163,184,0.35) transparent; }
+    .scroll-min::-webkit-scrollbar { width: 3px; }
+    .scroll-min::-webkit-scrollbar-track { background: transparent; }
+    .scroll-min::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.35); border-radius: 3px; }
     .del-mode-card { background:#3f1212 !important; color:#fca5a5 !important; }
   </style>
 </head>
@@ -1355,7 +1359,7 @@
     </div>
   </div>
 
-  <div style="flex:1;overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch">
+  <div class="scroll-min" style="flex:1;overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch">
     ${players.length === 0
       ? `<div style="height:100%;${C.card}display:flex;align-items:center;justify-content:center;color:#64748b;font-size:1.8vh">ยังไม่มีรายชื่อผู้เล่น</div>`
       : `<div style="min-height:100%;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:minmax(9vh,1fr);gap:1vh">
