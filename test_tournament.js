@@ -544,5 +544,37 @@ console.log('\n[singles mode] every team is a single player, full and limited, d
   check(`60 singles-mode trials run clean (0 failures)`, fails === 0);
 }
 
+// ── Test 13: pro ⭐ — with odd player count the pro is the solo player in EVERY cycle ──
+console.log('\n[pro mode] pro is solo every cycle when player count is odd');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({ length: 7 }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.proIds = [3];
+  S.mode = 'full';
+  ctx.startSession();
+  let allPro = true, noRepeatPartners = true;
+  const seen = new Set();
+  for (let c = 0; c < 5; c++) {
+    const solo = S.teams.filter(t => t.length === 1);
+    if (solo.length !== 1 || solo[0][0] !== 3) allPro = false;
+    S.teams.forEach(t => { if (t.length === 2) { const k = pairKeyLocal2(t[0], t[1]); if (seen.has(k)) noRepeatPartners = false; seen.add(k); } });
+    let guard = 0;
+    while (S.screen === 'playing' && guard++ < 200) {
+      if (S.courtIdx == null || S.challengerIdx == null) break;
+      ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    }
+    if (c < 4) { ctx.startNewCycle(); if (ctx.__showRematchWarning) ctx.confirmRematchProceed(); }
+  }
+  check('pro (P3) is the lone solo team in all 5 cycles (one full round-robin of the other 6)', allPro);
+  check('no partner pair repeats across the 5 cycles', noRepeatPartners);
+  const ctx2 = freshContext(); const S2 = ctx2.__S;
+  S2.players = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+  S2.presentIds = S2.players.map(p => p.id); S2.proIds = [3]; S2.mode = 'full';
+  ctx2.startSession();
+  check('even count: no solo team', S2.teams.every(t => t.length === 2));
+}
+
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

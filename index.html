@@ -62,6 +62,7 @@
       teamMatchDeficit: {},      // {playerId: idealMatches - actualMatches, accumulated} — full/limited mode fairness across cycles
       limitedQueue: [],          // precomputed [teamIdxA, teamIdxB] pairs for the current 'limited' mode cycle
       limitedPlayedPairs: [],    // "i,j" team-idx pairs ever played in limited mode — minimizes rematches across cycles
+      proIds: [],                // playerIds tagged pro (⭐) — when player count is odd, a pro is the solo player every cycle
       newbieIds: [],             // playerIds tagged "new player" (🐥) — schedule generation avoids leaving them solo
       singlesMode: false,        // true = each team is a single player (1v1) instead of pairs (2v2)
     };
@@ -95,6 +96,7 @@
   let rematchRepeatedPairs = [];  // [[id,id], ...] pairs flagged as repeats in the pending cycle
   let pendingSchedule = null;
   let pendingScheduleIdx = 0;
+  let proMode = false;           // tap-to-tag mode for marking ⭐ pro players
   let newbieMode = false;        // tap-to-tag mode for marking 🐥 new players, like deleteMode
   let theme = localStorage.getItem('bmt_theme') || 'light';
 
@@ -330,12 +332,23 @@
   // problem can be eliminated schedule-wide; that's fine, since it'll be many cycles away
   // by the time it's reached. What matters is steering the IMMEDIATE next cycle, so only
   // that round is scored (repeats weighted far above the newbie-solo tiebreak).
-  function buildScheduleAvoidingRepeats(presentIds, usedPartners, newbieIds) {
+  function buildScheduleAvoidingRepeats(presentIds, usedPartners, newbieIds, proIds) {
     const used = new Set(usedPartners || []);
     const newbies = new Set(newbieIds || []);
+    // Odd player count + a pro present: the pro is the solo player EVERY cycle. Build the
+    // round-robin over everyone else (even count) and prepend the pro as a fixed solo team.
+    const presentPros = (proIds || []).filter(id => presentIds.includes(id));
+    const useProSolo = presentIds.length % 2 === 1 && presentPros.length > 0;
     let best = null, bestScore = Infinity;
     for (let attempt = 0; attempt < 300 && bestScore > 0; attempt++) {
-      const schedule = buildSchedule(shuffle([...presentIds]));
+      let schedule;
+      if (useProSolo) {
+        const pro = presentPros[Math.floor(Math.random() * presentPros.length)];
+        const others = presentIds.filter(id => id !== pro);
+        schedule = buildSchedule(shuffle(others)).map(teams => [[pro], ...teams]);
+      } else {
+        schedule = buildSchedule(shuffle([...presentIds]));
+      }
       const firstCycle = schedule[0];
       const repeats = firstCycle.filter(t => t.length === 2 && used.has(pairKey(t[0], t[1]))).length;
       const soloTeam = firstCycle.find(t => t.length === 1);
@@ -492,6 +505,7 @@
     S.players = S.players.filter(p => p.id !== id);
     S.presentIds = S.presentIds.filter(x => x !== id);
     S.newbieIds = (S.newbieIds || []).filter(x => x !== id);
+    S.proIds = (S.proIds || []).filter(x => x !== id);
     save(); render();
   }
   function togglePresent(id) {
@@ -503,6 +517,14 @@
     const set = new Set(S.newbieIds || []);
     if (set.has(id)) set.delete(id); else set.add(id);
     S.newbieIds = [...set];
+    S.proIds = (S.proIds || []).filter(x => x !== id); // a player can't be both
+    save(); render();
+  }
+  function togglePro(id) {
+    const set = new Set(S.proIds || []);
+    if (set.has(id)) set.delete(id); else set.add(id);
+    S.proIds = [...set];
+    S.newbieIds = (S.newbieIds || []).filter(x => x !== id);
     save(); render();
   }
   function clearAll() { S = defaultState(); save(); render(); }
@@ -775,7 +797,7 @@
       save(); render();
       return;
     }
-    const schedule = buildScheduleAvoidingRepeats(S.presentIds, [], S.newbieIds);
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, [], S.newbieIds, S.proIds);
     Object.assign(S, {
       screen: 'playing',
       rounds: [],
@@ -984,7 +1006,7 @@
     if (nextIdx >= schedule.length) {
       // Exhausted (or invalidated by a mid-game roster change) — regenerate, preferring
       // whichever shuffle repeats the fewest partnerships against the session's history.
-      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds);
+      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds);
       nextIdx = 0;
     }
     proceedOrWarnRematch(schedule, nextIdx);
@@ -1024,7 +1046,7 @@
   }
 
   function retryRematchShuffle() {
-    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds);
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds);
     proceedOrWarnRematch(schedule, 0);
   }
 
@@ -1341,11 +1363,17 @@
           ${players.map(p => {
             const on = presentIds.includes(p.id);
             const isNewbie = (S.newbieIds || []).includes(p.id);
+            const isPro = (S.proIds || []).includes(p.id);
             if (deleteMode) return `
 <button class="del-btn btn del-mode-card" data-id="${p.id}"
   style="width:100%;height:100%;border-radius:16px;font-weight:700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.4vh">
   <span style="font-size:3vh">✕</span>
   <span style="font-size:1.6vh">${p.name}</span>
+</button>`;
+            if (proMode) return `
+<button class="pro-btn btn" data-id="${p.id}" style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
+    background:${isPro ? '#1e3a5f' : '#1e293b'};color:${isPro ? '#93c5fd' : '#94a3b8'};border:2px solid ${isPro ? '#2563eb' : '#334155'}">
+  ⭐<br>${p.name}
 </button>`;
             if (newbieMode) return `
 <button class="newbie-btn btn" data-id="${p.id}" style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
@@ -1356,6 +1384,7 @@
 <button class="tog btn" data-id="${p.id}" style="width:100%;height:100%;border-radius:16px;font-size:2.2vh;font-weight:700;
     background:${on ? '#2563eb' : '#1e293b'};color:${on ? '#fff' : '#94a3b8'};position:relative">
   ${isNewbie ? '<span style="position:absolute;top:0.4vh;right:0.6vh;font-size:1.6vh">🐥</span>' : ''}
+  ${isPro ? '<span style="position:absolute;top:0.4vh;right:0.6vh;font-size:1.6vh">⭐</span>' : ''}
   ${p.name}
 </button>`;
           }).join('')}
@@ -1428,6 +1457,11 @@
       ${deleteMode ? '✕ ปิดโหมดลบ' : '🗑️ ลบรายชื่อ'}
     </button>
     ${!S.singlesMode ? `
+    <button id="toggleProModeBtn" class="btn"
+      style="background:${proMode ? '#1e3a5f' : '#1e293b'};color:${proMode ? '#93c5fd' : '#64748b'};
+        border-radius:12px;padding:0.6vh 1.5vh;font-size:2vh;border:1px solid ${proMode ? '#2563eb' : '#334155'}">
+      ${proMode ? '✕ ปิดโหมดโปร' : '⭐ โปร'}
+    </button>
     <button id="toggleNewbieModeBtn" class="btn"
       style="background:${newbieMode ? '#78350f' : '#1e293b'};color:${newbieMode ? '#fde68a' : '#64748b'};
         border-radius:12px;padding:0.6vh 1.5vh;font-size:2vh;border:1px solid ${newbieMode ? '#d97706' : '#334155'}">
@@ -1708,12 +1742,14 @@
     q('addBtn')?.addEventListener('click', () => { addPlayer(inp.value); inp.value = ''; inp.focus(); });
     inp?.addEventListener('keydown', e => { if (e.key === 'Enter') { addPlayer(inp.value); inp.value = ''; } });
     qa('.tog').forEach(b => b.addEventListener('click', () => togglePresent(+b.dataset.id)));
+    qa('.pro-btn').forEach(b => b.addEventListener('click', () => togglePro(+b.dataset.id)));
     qa('.newbie-btn').forEach(b => b.addEventListener('click', () => toggleNewbie(+b.dataset.id)));
     qa('.del-btn').forEach(b => b.addEventListener('click', () => { removePlayer(+b.dataset.id); }));
     q('startBtn')?.addEventListener('click', startSession);
     q('clearAllBtn')?.addEventListener('click', () => { if (confirm('ล้างข้อมูลทั้งหมด?')) { deleteMode = false; clearAll(); } });
-    q('toggleDelBtn')?.addEventListener('click', () => { deleteMode = !deleteMode; if (deleteMode) newbieMode = false; render(); });
-    q('toggleNewbieModeBtn')?.addEventListener('click', () => { newbieMode = !newbieMode; if (newbieMode) deleteMode = false; render(); });
+    q('toggleDelBtn')?.addEventListener('click', () => { deleteMode = !deleteMode; if (deleteMode) { newbieMode = false; proMode = false; } render(); });
+    q('toggleNewbieModeBtn')?.addEventListener('click', () => { newbieMode = !newbieMode; if (newbieMode) { deleteMode = false; proMode = false; } render(); });
+    q('toggleProModeBtn')?.addEventListener('click', () => { proMode = !proMode; if (proMode) { deleteMode = false; newbieMode = false; } render(); });
     q('modeFullBtn')?.addEventListener('click', () => { S.mode = 'full'; save(); render(); });
     q('modeLimitedBtn')?.addEventListener('click', () => { S.mode = 'limited'; save(); render(); });
     q('modeTournamentBtn')?.addEventListener('click', () => { S.mode = 'tournament'; save(); render(); });
