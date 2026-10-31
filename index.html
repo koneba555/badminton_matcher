@@ -342,13 +342,43 @@
   // problem can be eliminated schedule-wide; that's fine, since it'll be many cycles away
   // by the time it's reached. What matters is steering the IMMEDIATE next cycle, so only
   // that round is scored (repeats weighted far above the newbie-solo tiebreak).
-  function buildScheduleAvoidingRepeats(presentIds, usedPartners, newbieIds, proIds) {
+  // Several pros + odd player count: the solo slot rotates through the pros, one per cycle
+  // (cycle number c → pros[(c-1) % k]). Each cycle's partner pairs are drawn independently,
+  // picking the shuffle that repeats the fewest pairs already used (history + earlier cycles
+  // of this schedule). cycleOffset = number of cycles already played, so the rotation keeps
+  // its place across schedule rebuilds.
+  function buildProRotationSchedule(presentIds, used, pros, cycleOffset) {
+    const usedSet = new Set(used);
+    const len = Math.max(1, presentIds.length - 2);
+    const schedule = [];
+    for (let j = 0; j < len; j++) {
+      const solo = pros[(cycleOffset + j) % pros.length];
+      const others = presentIds.filter(id => id !== solo);
+      let bestPairs = null, bestRepeats = Infinity;
+      for (let attempt = 0; attempt < 200 && bestRepeats > 0; attempt++) {
+        const sh = shuffle([...others]);
+        const pairs = [];
+        for (let i = 0; i + 1 < sh.length; i += 2) pairs.push([sh[i], sh[i + 1]]);
+        const repeats = pairs.filter(p => usedSet.has(pairKey(p[0], p[1]))).length;
+        if (repeats < bestRepeats) { bestRepeats = repeats; bestPairs = pairs; }
+      }
+      bestPairs.forEach(p => usedSet.add(pairKey(p[0], p[1])));
+      schedule.push([[solo], ...bestPairs]);
+    }
+    return schedule;
+  }
+
+  function buildScheduleAvoidingRepeats(presentIds, usedPartners, newbieIds, proIds, cycleOffset) {
     const used = new Set(usedPartners || []);
     const newbies = new Set(newbieIds || []);
-    // Odd player count + a pro present: the pro is the solo player EVERY cycle. Build the
-    // round-robin over everyone else (even count) and prepend the pro as a fixed solo team.
-    const presentPros = (proIds || []).filter(id => presentIds.includes(id));
+    // Odd player count + a pro present: a pro is the solo player EVERY cycle. One pro: build
+    // the round-robin over everyone else (even count) with the pro as a fixed solo team.
+    // Several pros: rotate which pro is solo each cycle.
+    const presentPros = (proIds || []).filter(id => presentIds.includes(id)).sort((a, b) => a - b);
     const useProSolo = presentIds.length % 2 === 1 && presentPros.length > 0;
+    if (useProSolo && presentPros.length > 1) {
+      return buildProRotationSchedule(presentIds, used, presentPros, cycleOffset || 0);
+    }
     let best = null, bestScore = Infinity;
     for (let attempt = 0; attempt < 300 && bestScore > 0; attempt++) {
       let schedule;
@@ -1016,7 +1046,7 @@
     if (nextIdx >= schedule.length) {
       // Exhausted (or invalidated by a mid-game roster change) — regenerate, preferring
       // whichever shuffle repeats the fewest partnerships against the session's history.
-      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds);
+      schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds, S.cycleCount - 1);
       nextIdx = 0;
     }
     proceedOrWarnRematch(schedule, nextIdx);
@@ -1056,7 +1086,7 @@
   }
 
   function retryRematchShuffle() {
-    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds);
+    const schedule = buildScheduleAvoidingRepeats(S.presentIds, S.usedPartners, S.newbieIds, S.proIds, S.cycleCount - 1);
     proceedOrWarnRematch(schedule, 0);
   }
 

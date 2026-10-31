@@ -577,5 +577,32 @@ console.log('\n[pro mode] pro is solo every cycle when player count is odd');
   check('even count: no solo team', S2.teams.every(t => t.length === 2));
 }
 
+// ── Test 14: several pros — the solo slot rotates through the pros, one per cycle ──
+console.log('\n[pro mode] multiple pros rotate as the solo player');
+{
+  const ctx = freshContext();
+  const S = ctx.__S;
+  S.players = Array.from({ length: 9 }, (_, i) => ({ id: i + 1, name: `P${i + 1}` }));
+  S.presentIds = S.players.map(p => p.id);
+  S.proIds = [2, 5, 8];
+  S.mode = 'full';
+  ctx.startSession();
+  const soloSeq = [];
+  let onlyProsSolo = true;
+  for (let c = 0; c < 9; c++) {
+    const solo = S.teams.filter(t => t.length === 1);
+    if (solo.length !== 1) onlyProsSolo = false; else soloSeq.push(solo[0][0]);
+    let guard = 0;
+    while (S.screen === 'playing' && guard++ < 300) {
+      if (S.courtIdx == null || S.challengerIdx == null) break;
+      ctx.recordWinner(Math.random() < 0.5 ? 'court' : 'challenger', 'A');
+    }
+    if (c < 8) { ctx.startNewCycle(); if (ctx.__showRematchWarning) ctx.confirmRematchProceed(); }
+  }
+  check('every cycle has exactly one solo, and it is always a pro', onlyProsSolo && soloSeq.every(id => [2, 5, 8].includes(id)));
+  const rotates = soloSeq.every((id, i) => id === [2, 5, 8][i % 3]);
+  check(`solo rotates 2→5→8→2… (${soloSeq.join(',')})`, rotates);
+}
+
 console.log(failures === 0 ? '\n✓ All tournament/dual-court tests passed' : `\n✗ ${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
