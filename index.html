@@ -1481,6 +1481,9 @@
     const otherSlot = slot === 'A' ? 'B' : 'A';
     const courtField = slot === 'A' ? 'courtIdx' : 'courtIdxB';
     const names = i => S.teams[i].map(pname).join(' & ');
+    // Only worth showing when someone is actually resting on the bench; if every team fits
+    // on the two courts there's nothing to predict and the extra text just adds clutter.
+    if (S.teams.length <= 4) return '';
     const row = txt => `<div style="margin-top:0.8vh;padding-top:0.8vh;border-top:1px solid #334155;color:#93c5fd;font-size:1.5vh;font-weight:700">${txt}</div>`;
     if (S.mode === 'limited') {
       // When a court frees up, A re-seeds first (takes the head of the queue), then B takes
