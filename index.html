@@ -1162,7 +1162,15 @@
     // Theme toggle button (fixed top-left)
     html += `<button id="themeToggleBtn" class="btn" style="position:fixed;top:1.2vh;left:2vw;z-index:50;background:${theme==='dark'?'#334155':'#c8dff0'};color:${theme==='dark'?'#94a3b8':'#374151'};border-radius:8px;padding:0.4vh 0.8vh;font-size:1.8vh">${theme==='dark'?'☀️':'🌙'}</button>`;
     if (theme === 'light') DARK_TO_LIGHT.forEach(([d,l]) => { html = html.replaceAll(d, l); });
+    // render() rebuilds the whole DOM; keep the player grid's scroll position so tapping a
+    // name (or switching pro/newbie/delete mode) doesn't jump the list back to the top.
+    const prevScroll = document.querySelector('.scroll-min');
+    const keepScrollTop = prevScroll ? prevScroll.scrollTop : 0;
     document.getElementById('app').innerHTML = html;
+    if (keepScrollTop) {
+      const nextScroll = document.querySelector('.scroll-min');
+      if (nextScroll) nextScroll.scrollTop = keepScrollTop;
+    }
     applyThemeToDOM();
     bind();
   }

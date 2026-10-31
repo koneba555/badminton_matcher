@@ -39,6 +39,7 @@ function freshContext() {
   const documentStub = {
     getElementById: () => makeEl(),
     querySelectorAll: () => [],
+    querySelector: () => null,
     addEventListener: () => {},
     createElement: () => makeEl(),
     head: makeEl(),
